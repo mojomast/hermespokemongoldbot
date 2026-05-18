@@ -37,6 +37,11 @@ dependencies = [
 pyboy = ["pyboy>=2.0.0"]
 pygba = ["pygba>=0.1.0"]
 dashboard = ["aiofiles>=23.0.0"]
+rtc = [
+    "aiortc>=1.9.0",
+    "av>=12.0.0",
+    "sounddevice>=0.4.6",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
@@ -44,7 +49,7 @@ dev = [
     "ruff>=0.1.0",
 ]
 all = [
-    "pokemon-agent[pyboy,dashboard]",
+    "pokemon-agent[pyboy,dashboard,rtc]",
 ]
 
 [project.urls]
@@ -60,6 +65,7 @@ include = ["pokemon_agent*"]
 
 [tool.setuptools.package-data]
 "pokemon_agent.dashboard" = ["static/**/*"]
+"pokemon_agent.navigation" = ["data/*.json"]
 
 [tool.ruff]
 line-length = 100

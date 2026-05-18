@@ -10,10 +10,75 @@ text block suitable for injection into an LLM prompt.
 from __future__ import annotations
 
 import datetime
+import math
+import time
 import traceback
 from typing import Any, Dict, Optional
 
 from pokemon_agent.memory.reader import GameMemoryReader
+
+
+def _entropy(hist: list[int], total: int) -> float:
+    ent = 0.0
+    for count in hist:
+        if count:
+            p = count / total
+            ent -= p * math.log2(p)
+    return ent
+
+
+def _visual_textbox_features(reader: GameMemoryReader) -> dict[str, Any]:
+    emu = getattr(reader, "emu", None)
+    get_screen = getattr(emu, "get_screen", None)
+    if not callable(get_screen):
+        return {}
+    try:
+        from PIL import Image, ImageFilter, ImageStat
+        im = get_screen()
+        if not isinstance(im, Image.Image):
+            im = Image.fromarray(im)
+        gray = im.convert("L")
+        hist = gray.histogram()
+        total = gray.width * gray.height
+        entropy = _entropy(hist, total)
+        lower = gray.crop((0, 92, 160, 144))
+        upper = gray.crop((0, 0, 160, 92))
+        lower_stat = ImageStat.Stat(lower)
+        upper_stat = ImageStat.Stat(upper)
+        lower_edges = lower.filter(ImageFilter.FIND_EDGES)
+        edge_stat = ImageStat.Stat(lower_edges)
+        lower_colors = lower.getcolors(maxcolors=1_000_000) or []
+        dark_lower = sum(c for c, v in lower_colors if v < 72) / (160 * 52)
+        bright_lower = sum(c for c, v in lower_colors if v > 180) / (160 * 52)
+        palette_levels = len({v // 16 for _c, v in lower_colors})
+        contrast_gap = abs(lower_stat.mean[0] - upper_stat.mean[0])
+        textbox_like = bright_lower > 0.18 and lower_stat.stddev[0] > 18 and (edge_stat.mean[0] > 12 or contrast_gap > 14)
+        striped_floor_like = (
+            palette_levels <= 6
+            and entropy < 2.35
+            and lower_stat.stddev[0] > 35
+            and edge_stat.mean[0] > 45
+            and contrast_gap > 25
+        )
+        bright_dialogue_panel = bright_lower > 0.55 and contrast_gap > 60 and edge_stat.mean[0] > 35
+        if striped_floor_like and not bright_dialogue_panel:
+            textbox_like = False
+        menu_like = textbox_like and lower_stat.stddev[0] > 28 and palette_levels <= 8
+        screen_class = "menu_or_text" if menu_like else "dialogue" if textbox_like else "overworld_or_battle"
+        visual_active = False
+        if screen_class in {"dialogue", "menu_or_text"} and dark_lower > 0.12 and bright_lower > 0.5:
+            visual_active = bright_dialogue_panel or (dark_lower > 0.14 and contrast_gap > 70)
+        return {
+            "screen_class": screen_class,
+            "dark_lower": round(dark_lower, 3),
+            "bright_lower": round(bright_lower, 3),
+            "lower_edge_mean": round(edge_stat.mean[0], 3),
+            "lower_contrast_gap": round(contrast_gap, 3),
+            "bright_dialogue_panel": bright_dialogue_panel,
+            "visual_textbox_active": visual_active,
+        }
+    except Exception:
+        return {}
 
 
 def build_game_state(
@@ -35,11 +100,14 @@ def build_game_state(
         A JSON-serialisable game-state dictionary.  Sections that fail
         to read are ``None`` with an ``"_error"`` key.
     """
+    read_started_at = time.perf_counter()
+    read_started_frame = getattr(getattr(reader, "emu", None), "frame_count", frame_count)
     state: Dict[str, Any] = {
         "metadata": {
             "game": reader.game_name,
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "frame_count": frame_count,
+            "read_started_frame": read_started_frame,
         },
     }
 
@@ -52,6 +120,9 @@ def build_game_state(
         "map": reader.read_map_info,
         "flags": reader.read_flags,
     }
+    read_menu = getattr(reader, "read_menu", None)
+    if callable(read_menu):
+        sections["menu"] = read_menu
 
     for key, fn in sections.items():
         try:
@@ -64,6 +135,24 @@ def build_game_state(
             state[f"{key}_error"] = (
                 f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             )
+
+    visual = _visual_textbox_features(reader)
+    if visual:
+        state["visual"] = visual
+        dialog = state.get("dialog")
+        if isinstance(dialog, dict):
+            dialog.setdefault("ram_active", dialog.get("active"))
+            dialog["visual_active"] = visual.get("visual_textbox_active") is True
+            dialog["visual_source"] = "screen_lower_panel"
+            if dialog["visual_active"]:
+                dialog["active"] = True
+
+    read_finished_frame = getattr(getattr(reader, "emu", None), "frame_count", frame_count)
+    state["metadata"].update({
+        "read_finished_frame": read_finished_frame,
+        "read_consistent": read_started_frame == read_finished_frame if read_started_frame is not None and read_finished_frame is not None else None,
+        "read_duration_ms": round((time.perf_counter() - read_started_at) * 1000, 3),
+    })
 
     return state
 

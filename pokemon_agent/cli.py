@@ -25,9 +25,14 @@ BANNER = r"""
 
 
 def _detect_game_type(rom_path: str) -> str:
+    name = Path(rom_path).name.lower()
+    if "pokemon_gold" in name or "pokemon gold" in name or "gold" in name or "silver" in name:
+        return "gold"
     ext = Path(rom_path).suffix.lower()
-    if ext in (".gb", ".gbc"):
+    if ext == ".gb":
         return "red"
+    elif ext == ".gbc":
+        return "generic"
     elif ext == ".gba":
         return "firered"
     return "unknown"

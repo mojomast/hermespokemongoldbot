@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hermes Plays Pokémon</title>
-    <link rel="stylesheet" href="style.css?v=3">
+    <link rel="stylesheet" href="style.css?v=18">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>">
 </head>
 <body>
@@ -20,13 +20,14 @@
         ╩  ╚═╝╩ ╩╚═╝╩ ╩╚═╝╝╚╝</pre>
         </div>
         <div class="header-status">
+            <span class="viewer-counter" id="dashboardViewerCount">0 live viewers</span>
             <span class="status-dot" id="statusDot"></span>
             <span class="status-text" id="statusText">Connecting...</span>
         </div>
     </header>
 
     <!-- Main Content Grid -->
-    <main class="main-grid">
+    <main class="main-grid" id="mainGrid">
         <!-- Left Panel: AI Log -->
         <section class="panel log-panel">
             <div class="panel-header">
@@ -34,13 +35,65 @@
                 <span class="panel-title">AI Thought Process & Action Log</span>
                 <button class="btn-clear" id="btnClearLog" title="Clear log">✕</button>
             </div>
-            <div class="log-container" id="logContainer">
+            <div class="log-container dashboard-section" id="logContainer" data-section-id="thought-log" data-section-title="Thought & Action Log">
                 <div class="log-entry log-status">
                     <span class="log-time">--:--:--</span>
                     <span class="log-text">Dashboard initializing...</span>
                 </div>
             </div>
+            <div class="autoplayer-panel dashboard-section" data-section-id="autoplayer" data-section-title="Goal, Status & Memory">
+                <div class="autoplayer-row">
+                    <button class="control-btn bot-toggle" id="btnBotToggle">Pause Bot</button>
+                    <select id="botEngine" class="bot-select bot-engine" title="Bot Engine">
+                        <option value="v1">Legacy V1</option>
+                        <option value="v2">Navigation V2</option>
+                    </select>
+                    <select id="botBias" class="bot-select">
+                        <option value="west_north">Bias: West/North</option>
+                        <option value="north_east">Bias: North/East</option>
+                        <option value="balanced">Bias: Balanced</option>
+                    </select>
+                </div>
+                <label class="bot-label">Objective</label>
+                <input id="botObjective" class="bot-input" value="reach Violet City and win the first gym badge">
+                <label class="bot-label">Guidance prompt</label>
+                <textarea id="botGuidance" class="bot-input bot-guidance" placeholder="Example: You are not in dialogue. Walk west until you leave the starting area, then go north."></textarea>
+                <button class="control-btn bot-apply" id="btnBotGuidance">Send Guidance</button>
+                <div class="bot-status" id="botStatus">Bot status loading...</div>
+                <div class="bot-diagnostics" id="botDiagnostics">Navigation diagnostics loading...</div>
+                <div class="bot-memory" id="botMemory">Memory loading...</div>
+            </div>
+            <div class="save-panel dashboard-section" data-section-id="runs-saves" data-section-title="Runs & Raw Save States">
+                <div class="save-title">Runs</div>
+                <div class="save-row">
+                    <input id="runName" class="bot-input save-input" placeholder="run name, e.g. main_route29">
+                    <button class="control-btn" id="btnSaveRun">Save Run</button>
+                </div>
+                <div class="save-row">
+                    <select id="runList" class="bot-select save-list">
+                        <option value="">Loading runs...</option>
+                    </select>
+                    <button class="control-btn" id="btnLoadRun">Load Run</button>
+                    <button class="control-btn" id="btnNewRun">New Run</button>
+                </div>
+                <div class="save-status" id="runStatus">Runs are named snapshots you can return to later.</div>
+                <div class="save-title save-subtitle">Raw Save States</div>
+                <div class="save-row">
+                    <input id="saveName" class="bot-input save-input" placeholder="save name, e.g. before_route29">
+                    <button class="control-btn" id="btnSaveState">Save</button>
+                </div>
+                <div class="save-row">
+                    <select id="saveList" class="bot-select save-list">
+                        <option value="">Loading saves...</option>
+                    </select>
+                    <button class="control-btn" id="btnLoadState">Load</button>
+                    <button class="control-btn" id="btnRefreshSaves">Refresh</button>
+                </div>
+                <div class="save-status" id="saveStatus">Manual and milestone saves are stored on the server.</div>
+            </div>
         </section>
+
+        <div class="main-resize-handle" id="mainResizeHandle" title="Drag to resize columns" aria-label="Resize dashboard columns"></div>
 
         <!-- Right Panel: Game View -->
         <section class="panel game-panel">
@@ -51,8 +104,9 @@
             </div>
 
             <!-- Game Screen with corner brackets -->
-            <div class="game-screen-wrapper">
+            <div class="game-screen-wrapper dashboard-section" data-section-id="screen" data-section-title="Game Screen">
                 <div class="game-screen-frame">
+                    <video id="gameStream" class="game-stream hidden" autoplay playsinline muted controls title="Click once to enable audio"></video>
                     <img id="gameScreen" class="game-screen" alt="Game Screen"
                          src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPj/HwADBwIAMCbHYQAAAABJRU5ErkJggg==">
                     <div class="game-screen-overlay" id="screenOverlay">
@@ -61,8 +115,34 @@
                 </div>
             </div>
 
+            <!-- Manual Controls (Doom-style watch controls) -->
+            <div class="controls-panel dashboard-section" data-section-id="controls" data-section-title="Manual Controls">
+                <div class="controls-title">Manual Controls</div>
+                <div class="dpad-grid" aria-label="D-pad controls">
+                    <button class="control-btn spacer" disabled></button>
+                    <button class="control-btn" data-action="walk_up" title="W / ArrowUp">▲</button>
+                    <button class="control-btn spacer" disabled></button>
+                    <button class="control-btn" data-action="walk_left" title="A / ArrowLeft">◀</button>
+                    <button class="control-btn" data-action="wait_60" title="Space">WAIT</button>
+                    <button class="control-btn" data-action="walk_right" title="D / ArrowRight">▶</button>
+                    <button class="control-btn spacer" disabled></button>
+                    <button class="control-btn" data-action="walk_down" title="S / ArrowDown">▼</button>
+                    <button class="control-btn spacer" disabled></button>
+                </div>
+                <div class="face-buttons" aria-label="Game Boy buttons">
+                    <button class="control-btn face-a" data-action="press_a" title="J / Enter">A</button>
+                    <button class="control-btn face-b" data-action="press_b" title="K / Backspace">B</button>
+                    <button class="control-btn" data-action="press_start" title="Enter">START</button>
+                    <button class="control-btn" data-action="press_select" title="Shift">SELECT</button>
+                    <button class="control-btn" data-action="a_until_dialog_end" title="Fast-forward text">A×TEXT</button>
+                </div>
+                <div class="controls-hint">
+                    Keyboard: WASD/Arrows move, J=A, K=B, Enter=Start, Shift=Select, Space=wait.
+                </div>
+            </div>
+
             <!-- Stats Grid -->
-            <div class="stats-grid">
+            <div class="stats-grid dashboard-section" data-section-id="stats" data-section-title="Stats">
                 <div class="stat-item">
                     <span class="stat-label">Badges</span>
                     <div class="badges-row" id="badgesRow">
@@ -98,8 +178,51 @@
                 </div>
             </div>
 
+            <div class="inventory-panel dashboard-section" data-section-id="inventory" data-section-title="Inventory">
+                <div class="panel-header compact-header">
+                    <span class="panel-icon">▣</span>
+                    <span class="panel-title">Inventory</span>
+                </div>
+                <div class="inventory-content" id="inventoryContent">Inventory loading...</div>
+            </div>
+
+            <div class="below-inventory-grid dashboard-section" data-section-id="team" data-section-title="Current Team">
+                <section class="panel team-panel">
+                    <div class="panel-header">
+                        <span class="panel-icon">⚡</span>
+                        <span class="panel-title">Current Team</span>
+                    </div>
+                    <div class="team-container" id="teamContainer">
+                        <div class="team-card empty-card">
+                            <div class="team-name">Empty</div>
+                            <div class="empty-pokeball">○</div>
+                        </div>
+                        <div class="team-card empty-card">
+                            <div class="team-name">Empty</div>
+                            <div class="empty-pokeball">○</div>
+                        </div>
+                        <div class="team-card empty-card">
+                            <div class="team-name">Empty</div>
+                            <div class="empty-pokeball">○</div>
+                        </div>
+                        <div class="team-card empty-card">
+                            <div class="team-name">Empty</div>
+                            <div class="empty-pokeball">○</div>
+                        </div>
+                        <div class="team-card empty-card">
+                            <div class="team-name">Empty</div>
+                            <div class="empty-pokeball">○</div>
+                        </div>
+                        <div class="team-card empty-card">
+                            <div class="team-name">Empty</div>
+                            <div class="empty-pokeball">○</div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
             <!-- Battle Info (hidden when not in battle) -->
-            <div class="battle-info hidden" id="battleInfo">
+            <div class="battle-info hidden dashboard-section" id="battleInfo" data-section-id="battle" data-section-title="Battle">
                 <div class="panel-header">
                     <span class="panel-icon">⚔️</span>
                     <span class="panel-title">Battle</span>
@@ -109,41 +232,6 @@
         </section>
     </main>
 
-    <!-- Bottom Panel: Team -->
-    <section class="panel team-panel">
-        <div class="panel-header">
-            <span class="panel-icon">⚡</span>
-            <span class="panel-title">Current Team</span>
-        </div>
-        <div class="team-container" id="teamContainer">
-            <!-- Empty team slots -->
-            <div class="team-card empty-card">
-                <div class="team-name">Empty</div>
-                <div class="empty-pokeball">○</div>
-            </div>
-            <div class="team-card empty-card">
-                <div class="team-name">Empty</div>
-                <div class="empty-pokeball">○</div>
-            </div>
-            <div class="team-card empty-card">
-                <div class="team-name">Empty</div>
-                <div class="empty-pokeball">○</div>
-            </div>
-            <div class="team-card empty-card">
-                <div class="team-name">Empty</div>
-                <div class="empty-pokeball">○</div>
-            </div>
-            <div class="team-card empty-card">
-                <div class="team-name">Empty</div>
-                <div class="empty-pokeball">○</div>
-            </div>
-            <div class="team-card empty-card">
-                <div class="team-name">Empty</div>
-                <div class="empty-pokeball">○</div>
-            </div>
-        </div>
-    </section>
-
     <!-- Dialog overlay (shown when dialog is active) -->
     <div class="dialog-overlay hidden" id="dialogOverlay">
         <div class="dialog-box">
@@ -151,6 +239,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=3"></script>
+    <script src="app.js?v=13"></script>
 </body>
 </html>

@@ -16,8 +16,13 @@
         Steel: '#B8B8D0', Fairy: '#EE99AC'
     };
     const POLL_INTERVAL = 3000;
+    const SCREENSHOT_INTERVAL = 125;
     const WS_RECONNECT_BASE = 1000;
     const WS_RECONNECT_MAX = 30000;
+    const RTC_ENABLED = true;
+    const DASHBOARD_LAYOUT_KEY = 'pokemon_dashboard_layout_v1';
+    const DEFAULT_SECTION_ORDER = ['screen', 'controls', 'stats', 'inventory', 'team', 'battle'];
+    const DEFAULT_LEFT_SECTION_ORDER = ['thought-log', 'autoplayer', 'runs-saves'];
 
     // --- State ---
     let ws = null;
@@ -26,16 +31,24 @@
     let wsReconnectTimer = null;
     let pollTimer = null;
     let screenshotTimer = null;
+    let screenshotInFlight = false;
+    let renderedFrames = 0;
     let autoScroll = true;
     let turnCount = 0;
     let lastStateJSON = '';
     let hasReceivedFrame = false;
+    let lastActionFrameAt = 0;
+    let rtcPeer = null;
+    let rtcActive = false;
+    let watchStatsWS = null;
 
     // --- DOM refs ---
     const $ = (id) => document.getElementById(id);
     const statusDot = $('statusDot');
     const statusText = $('statusText');
+    const dashboardViewerCount = $('dashboardViewerCount');
     const logContainer = $('logContainer');
+    const gameStream = $('gameStream');
     const gameScreen = $('gameScreen');
     const screenOverlay = $('screenOverlay');
     const teamContainer = $('teamContainer');
@@ -45,12 +58,36 @@
     const statMoney = $('statMoney');
     const statPlayTime = $('statPlayTime');
     const statTurns = $('statTurns');
+    const inventoryContent = $('inventoryContent');
     const battleInfo = $('battleInfo');
     const battleContent = $('battleContent');
     const dialogOverlay = $('dialogOverlay');
     const dialogText = $('dialogText');
     const frameCount = $('frameCount');
     const btnClearLog = $('btnClearLog');
+    const btnBotToggle = $('btnBotToggle');
+    const botEngine = $('botEngine');
+    const botBias = $('botBias');
+    const botObjective = $('botObjective');
+    const botGuidance = $('botGuidance');
+    const btnBotGuidance = $('btnBotGuidance');
+    const botStatus = $('botStatus');
+    const botDiagnostics = $('botDiagnostics');
+    const botMemory = $('botMemory');
+    const saveName = $('saveName');
+    const saveList = $('saveList');
+    const btnSaveState = $('btnSaveState');
+    const btnLoadState = $('btnLoadState');
+    const btnRefreshSaves = $('btnRefreshSaves');
+    const saveStatus = $('saveStatus');
+    const runName = $('runName');
+    const runList = $('runList');
+    const btnSaveRun = $('btnSaveRun');
+    const btnLoadRun = $('btnLoadRun');
+    const btnNewRun = $('btnNewRun');
+    const runStatus = $('runStatus');
+    let botEnabled = true;
+    let lastBotTurn = null;
 
     // --- Utilities ---
     function getBaseURL() {
@@ -60,6 +97,11 @@
     function getWSURL() {
         var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         return proto + '//' + window.location.host + '/ws';
+    }
+
+    function getWatchStatsWSURL() {
+        var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return proto + '//' + window.location.host + '/watch/ws?role=stats';
     }
 
     function timeNow() {
@@ -101,11 +143,15 @@
 
         entry.appendChild(timeSpan);
         entry.appendChild(textSpan);
-        logContainer.appendChild(entry);
+        var resizeHandle = logContainer.querySelector(':scope > .section-resize-handle');
+        if (resizeHandle) logContainer.insertBefore(entry, resizeHandle);
+        else logContainer.appendChild(entry);
 
         // Limit log entries to prevent memory issues
-        while (logContainer.children.length > 500) {
-            logContainer.removeChild(logContainer.firstChild);
+        while (logContainer.querySelectorAll(':scope > .log-entry').length > 500) {
+            var oldest = logContainer.querySelector(':scope > .log-entry');
+            if (!oldest) break;
+            logContainer.removeChild(oldest);
         }
 
         if (autoScroll) {
@@ -166,13 +212,80 @@
     }
 
     // --- Game Screen ---
-    function renderGameScreen(base64png) {
+    function renderGameScreen(base64png, source) {
         if (!base64png) return;
+        if (rtcActive) return;
         if (!hasReceivedFrame) {
             hasReceivedFrame = true;
             screenOverlay.classList.add('hidden');
         }
         gameScreen.src = 'data:image/png;base64,' + base64png;
+        renderedFrames++;
+        if (source === 'action') lastActionFrameAt = Date.now();
+        if (frameCount) frameCount.textContent = renderedFrames + ' frames' + (source === 'action' ? ' · action-synced' : '');
+    }
+
+    function setRtcActive(active, audioActive) {
+        rtcActive = active;
+        if (gameStream) gameStream.classList.toggle('hidden', !active);
+        if (gameScreen) gameScreen.classList.toggle('hidden', active);
+        if (active && !hasReceivedFrame) {
+            hasReceivedFrame = true;
+            screenOverlay.classList.add('hidden');
+        }
+        if (active && frameCount) frameCount.textContent = 'WebRTC live' + (audioActive ? ' · audio' : ' · silent fallback');
+    }
+
+    function startRTC() {
+        if (!RTC_ENABLED || !window.RTCPeerConnection || !gameStream || rtcPeer) return;
+        function enableAudio() {
+            if (!gameStream) return;
+            gameStream.muted = false;
+            gameStream.play().catch(function () {});
+        }
+        gameStream.addEventListener('click', enableAudio);
+        document.addEventListener('pointerdown', enableAudio, { once: true });
+        var pc = new RTCPeerConnection({ iceServers: [] });
+        rtcPeer = pc;
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.ontrack = function (event) {
+            var stream = event.streams && event.streams[0];
+            if (!stream) return;
+            gameStream.srcObject = stream;
+            gameStream.play().catch(function () {});
+            setRtcActive(true, stream.getAudioTracks().length > 0);
+        };
+        pc.onconnectionstatechange = function () {
+            if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
+                setRtcActive(false, false);
+            }
+        };
+        pc.createOffer()
+            .then(function (offer) { return pc.setLocalDescription(offer); })
+            .then(function () {
+                return fetch(getBaseURL() + '/rtc/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(pc.localDescription)
+                });
+            })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (answer) {
+                return pc.setRemoteDescription(answer).then(function () {
+                    setRtcActive(true, answer.audio === true);
+                    addLog('status', 'WebRTC live stream connected' + (answer.audio ? ' with audio' : ' with silent audio fallback'));
+                });
+            })
+            .catch(function (error) {
+                addLog('status', 'WebRTC unavailable; using screenshot fallback: ' + error.message);
+                try { pc.close(); } catch (_) {}
+                rtcPeer = null;
+                setRtcActive(false, false);
+            });
     }
 
     // --- Stats ---
@@ -204,8 +317,11 @@
             dialogOverlay.classList.add('hidden');
         }
 
+        // Inventory
+        renderInventory(state.bag || []);
+
         // Battle
-        if (state.battle) {
+        if (state.battle && state.battle.in_battle) {
             renderBattle(state.battle);
         } else {
             battleInfo.classList.add('hidden');
@@ -220,6 +336,28 @@
         if (state.metadata && state.metadata.frame_count) {
             frameCount.textContent = 'Frame ' + state.metadata.frame_count;
         }
+    }
+
+    function renderInventory(bag) {
+        if (!inventoryContent) return;
+        inventoryContent.innerHTML = '';
+        if (!bag || !bag.length) {
+            inventoryContent.textContent = 'No readable items.';
+            return;
+        }
+        var important = [];
+        var rest = [];
+        bag.forEach(function (item) {
+            var id = item.item_id;
+            if (id === 0x02 || id === 0x03 || id === 0x04 || id === 0x12) important.push(item);
+            else rest.push(item);
+        });
+        important.concat(rest).slice(0, 12).forEach(function (item) {
+            var pill = document.createElement('span');
+            pill.className = 'inventory-pill';
+            pill.textContent = (item.item || ('Item 0x' + Number(item.item_id || 0).toString(16))) + ' x' + (item.quantity || 0);
+            inventoryContent.appendChild(pill);
+        });
     }
 
     // --- Badges ---
@@ -262,11 +400,20 @@
         var card = document.createElement('div');
         card.className = 'team-card';
 
-        // Name
-        var name = document.createElement('div');
-        name.className = 'team-name';
-        name.textContent = mon.nickname || mon.species || '???';
-        card.appendChild(name);
+        var speciesText = mon.species || (mon.species_id ? 'Species 0x' + Number(mon.species_id).toString(16) : '???');
+        var nicknameText = mon.nickname && mon.nickname !== speciesText ? mon.nickname : '';
+
+        var species = document.createElement('div');
+        species.className = 'team-species';
+        species.textContent = speciesText;
+        card.appendChild(species);
+
+        if (nicknameText) {
+            var nickname = document.createElement('div');
+            nickname.className = 'team-nickname';
+            nickname.textContent = 'Nick: ' + nicknameText;
+            card.appendChild(nickname);
+        }
 
         // Level
         var level = document.createElement('div');
@@ -322,6 +469,11 @@
             statusEl.className = 'status-condition ' + mon.status.toLowerCase();
             statusEl.textContent = mon.status.toUpperCase();
             card.appendChild(statusEl);
+        } else if (mon.status_condition) {
+            var conditionEl = document.createElement('span');
+            conditionEl.className = 'status-condition ' + String(mon.status_condition).toLowerCase();
+            conditionEl.textContent = String(mon.status_condition).toUpperCase();
+            card.appendChild(conditionEl);
         }
 
         // Moves
@@ -363,13 +515,16 @@
         // Battle type
         var typeLabel = document.createElement('span');
         typeLabel.className = 'type-badge';
-        typeLabel.textContent = (battle.type || 'wild').toUpperCase();
+        typeLabel.textContent = (battle.type || (battle.type_id ? 'battle ' + battle.type_id : 'wild')).toUpperCase();
         typeLabel.style.backgroundColor = battle.type === 'trainer' ? '#C03028' : '#58a6ff';
         info.appendChild(typeLabel);
 
         // Enemy info
         var enemyText = document.createElement('span');
-        enemyText.textContent = '  vs ' + (enemy.species || '???') + ' Lv.' + (enemy.level || '?');
+        var enemySpeciesId = enemy.species_id || battle.enemy_species_id || battle.wild_species_id;
+        var enemySpecies = enemy.species || battle.enemy_species || (enemySpeciesId ? 'Species 0x' + Number(enemySpeciesId).toString(16) : '???');
+        var enemyLevel = enemy.level || battle.enemy_level || '?';
+        enemyText.textContent = '  vs ' + enemySpecies + ' Lv.' + enemyLevel;
         info.appendChild(enemyText);
 
         // Enemy HP
@@ -437,6 +592,41 @@
         };
     }
 
+    function setViewerCount(count) {
+        if (!dashboardViewerCount || count == null) return;
+        dashboardViewerCount.textContent = count + ' live viewer' + (count === 1 ? '' : 's');
+    }
+
+    function pollWatchStatus() {
+        fetch(getBaseURL() + '/watch/status')
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (payload) {
+                if (payload) setViewerCount(payload.viewers);
+            })
+            .catch(function () {});
+    }
+
+    function connectWatchStats() {
+        pollWatchStatus();
+        if (!window.WebSocket || watchStatsWS) return;
+        try {
+            watchStatsWS = new WebSocket(getWatchStatsWSURL());
+        } catch (e) {
+            watchStatsWS = null;
+            return;
+        }
+        watchStatsWS.onmessage = function (evt) {
+            try {
+                var msg = JSON.parse(evt.data);
+                if (msg.viewers != null) setViewerCount(msg.viewers);
+            } catch (e) {}
+        };
+        watchStatsWS.onclose = function () {
+            watchStatsWS = null;
+            setTimeout(connectWatchStats, 3000);
+        };
+    }
+
     function scheduleReconnect() {
         if (wsReconnectTimer) return;
         wsReconnectTimer = setTimeout(function () {
@@ -455,6 +645,9 @@
         if (type === 'action') {
             // Action events: log the action and update state
             renderLog(msg);
+            if (msg.screenshot_after && msg.screenshot_after.image) {
+                renderGameScreen(msg.screenshot_after.image, 'action');
+            }
             if (msg.state_after) {
                 var stateJSON = JSON.stringify(msg.state_after);
                 if (stateJSON !== lastStateJSON) {
@@ -469,7 +662,12 @@
                 renderStats(statePayload);
             }
         } else if (type === 'screenshot' && msg.data && msg.data.image) {
-            renderGameScreen(msg.data.image);
+            // Action events carry their matching post-action frame. Avoid an
+            // independent screenshot event immediately overwriting that synced
+            // frame and visually desynchronizing command/action logs.
+            if (Date.now() - lastActionFrameAt > 300) {
+                renderGameScreen(msg.data.image, 'push');
+            }
         } else {
             renderLog(msg);
         }
@@ -500,6 +698,12 @@
     }
 
     function pollScreenshot() {
+        if (rtcActive) return;
+        // When WebSocket is up, action events carry post-action frames. Polling
+        // is only a fallback for startup/disconnect/no-action periods.
+        if (wsConnected && Date.now() - lastActionFrameAt < 2500) return;
+        if (screenshotInFlight) return;
+        screenshotInFlight = true;
         fetch(getBaseURL() + '/screenshot/base64')
             .then(function (r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -507,11 +711,14 @@
             })
             .then(function (data) {
                 if (data && data.image) {
-                    renderGameScreen(data.image);
+                    renderGameScreen(data.image, 'poll');
                 }
             })
             .catch(function () {
                 // silent fail
+            })
+            .finally(function () {
+                screenshotInFlight = false;
             });
     }
 
@@ -519,8 +726,410 @@
         // Always poll for state and screenshots
         pollState();
         pollScreenshot();
+        pollAutoplayer();
+        refreshSaves();
+        refreshRuns();
         pollTimer = setInterval(pollState, POLL_INTERVAL);
-        screenshotTimer = setInterval(pollScreenshot, POLL_INTERVAL);
+        screenshotTimer = setInterval(pollScreenshot, SCREENSHOT_INTERVAL);
+        setInterval(pollAutoplayer, 2500);
+    }
+
+    function renderAutoplayer(payload) {
+        if (!payload) return;
+        var control = payload.control || {};
+        var status = payload.status || {};
+        var engine = control.engine || status.selected_engine || status.engine || 'v1';
+        var runnerEngine = status.engine || engine;
+        botEnabled = control.enabled !== false;
+        if (btnBotToggle) btnBotToggle.textContent = botEnabled ? 'Pause Bot' : 'Resume Bot';
+        if (botEngine && engine && document.activeElement !== botEngine) botEngine.value = engine;
+        if (botBias && control.movement_bias) botBias.value = control.movement_bias;
+        if (botObjective && control.objective && document.activeElement !== botObjective) botObjective.value = control.objective;
+        if (botGuidance && control.guidance_prompt != null && document.activeElement !== botGuidance) botGuidance.value = control.guidance_prompt;
+        if (botStatus) {
+            botStatus.innerHTML = '<strong>' + (botEnabled ? 'Playing' : 'Paused') + '</strong>'
+                + ' · engine ' + engine.toUpperCase()
+                + (runnerEngine !== engine ? ' · runner ' + runnerEngine.toUpperCase() : '')
+                + ' · turn ' + (status.turn != null ? status.turn : '---')
+                + ' · ' + (status.phase || 'unknown')
+                + ' · ' + (status.macro || status.message || 'waiting')
+                + ' · reward ' + (status.reward != null ? status.reward : '---');
+            if (status.guidance_prompt) {
+                botStatus.innerHTML += '<br>Guidance: ' + truncate(status.guidance_prompt, 140);
+            }
+        }
+        renderBotDiagnostics(status);
+        renderBotMemory(payload.memory || status.memory);
+        if (status.turn != null && status.turn !== lastBotTurn) {
+            lastBotTurn = status.turn;
+            addLog('thinking', 'Bot: ' + (status.objective || control.objective || 'playing') + ' · phase=' + (status.phase || '?') + ' · macro=' + (status.macro || '?'));
+            if (status.actions && status.actions.length) {
+                addLog('action', 'Bot action: ' + status.actions.join(', ') + ' · reward=' + (status.reward != null ? status.reward : '?'));
+            }
+        }
+    }
+
+    function renderBotDiagnostics(status) {
+        if (!botDiagnostics) return;
+        status = status || {};
+        var nav = status.navigation || {};
+        var goal = status.current_goal || status.goal || {};
+        var goalText = goal.map_name || goal.name || status.current_task || status.objective || 'unknown';
+        if (goal.x != null && goal.y != null) {
+            goalText += ' (' + goal.x + ', ' + goal.y + ')';
+        }
+        var pathLength = nav.planned_path_length != null ? nav.planned_path_length : status.planned_path_length;
+        var nextStep = nav.next_step || status.next_step || (status.actions && status.actions[0]) || '---';
+        var stepResult = nav.last_step_result || status.last_step_result || '---';
+        var replans = nav.replan_count != null ? nav.replan_count : status.replan_count;
+        var stuck = nav.stuck_counter != null ? nav.stuck_counter : status.stuck_counter;
+        botDiagnostics.innerHTML = '<strong>Goal</strong>: ' + truncate(goalText, 90)
+            + '<br><strong>Next</strong>: ' + nextStep
+            + ' · result ' + stepResult
+            + ' · path ' + (pathLength != null ? pathLength : '---')
+            + ' · replans ' + (replans != null ? replans : '---')
+            + ' · stuck ' + (stuck != null ? stuck : '---');
+        if (nav.path_source || nav.map_spec || nav.recovery_level != null) {
+            botDiagnostics.innerHTML += '<br><strong>Nav</strong>: '
+                + (nav.path_source || 'unknown')
+                + ' · map ' + (nav.map_spec || '---')
+                + ' · recovery ' + (nav.recovery_level != null ? nav.recovery_level : '---');
+        }
+    }
+
+    function renderBotMemory(memory) {
+        if (!botMemory || !memory) return;
+        var current = memory.current_place || {};
+        var npcs = memory.important_npcs || [];
+        var exits = current.exits || {};
+        var notes = current.notes || [];
+        var html = '<strong>Memory</strong>: ' + (memory.places_known || 0) + ' places known';
+        if (memory.local_position) {
+            html += ' · local pos (' + (memory.local_position.x || 0) + ', ' + (memory.local_position.y || 0) + ')';
+        }
+        if (memory.local_cells_known) html += ' · ' + memory.local_cells_known + ' mapped cells';
+        html += ' · current visits ' + (current.visits || 0);
+        if (current.important) html += ' · important place';
+        var exitKeys = Object.keys(exits);
+        if (exitKeys.length) html += '<br>Known exits: ' + exitKeys.map(function (k) { return k + '→' + exits[k]; }).join(', ');
+        if (notes.length) html += '<br>Notes: ' + notes.map(function (n) { return truncate(n.text || '', 90); }).join(' | ');
+        if (npcs.length) html += '<br>Important NPC/place hints: ' + npcs.map(function (n) { return truncate(n.hint || n.place || '', 90); }).join(' | ');
+        botMemory.innerHTML = html;
+    }
+
+    function pollAutoplayer() {
+        fetch(getBaseURL() + '/autoplayer/status')
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(renderAutoplayer)
+            .catch(function (e) {
+                if (botStatus) botStatus.textContent = 'Bot status unavailable: ' + e.message;
+            });
+    }
+
+    function updateAutoplayerControl(updates) {
+        fetch(getBaseURL() + '/autoplayer/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates)
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function () {
+                pollAutoplayer();
+            })
+            .catch(function (e) {
+                addLog('error', 'Bot control failed: ' + e.message);
+            });
+    }
+
+    // --- Save States ---
+    function safeSaveName(raw) {
+        var name = (raw || '').trim().replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '');
+        if (!name) {
+            var d = new Date();
+            name = 'manual_' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+        }
+        return name.substring(0, 64);
+    }
+
+    function setSaveStatus(text, isError) {
+        if (!saveStatus) return;
+        saveStatus.textContent = text;
+        saveStatus.style.color = isError ? 'var(--accent-red)' : 'var(--text-dim)';
+    }
+
+    function setRunStatus(text, isError) {
+        if (!runStatus) return;
+        runStatus.textContent = text;
+        runStatus.style.color = isError ? 'var(--accent-red)' : 'var(--text-dim)';
+    }
+
+    function renderRunOptions(payload) {
+        if (!runList) return;
+        var runs = payload.runs || [];
+        var current = (payload.current_run || {}).name || '';
+        runList.innerHTML = '';
+        if (!runs.length) {
+            var empty = document.createElement('option');
+            empty.value = '';
+            empty.textContent = 'No runs yet';
+            runList.appendChild(empty);
+            return;
+        }
+        runs.forEach(function (item) {
+            var opt = document.createElement('option');
+            opt.value = item.name;
+            var when = item.modified ? new Date(item.modified * 1000).toLocaleString() : 'unknown time';
+            var snap = item.snapshot || {};
+            var pos = (snap.player && snap.player.position) || {};
+            var map = pos.map_name || (snap.map && snap.map.map_name) || 'unknown map';
+            opt.textContent = item.name + (item.name === current ? ' (current)' : '') + ' · ' + map + ' · ' + when;
+            runList.appendChild(opt);
+        });
+        if (current) runList.value = current;
+    }
+
+    function refreshRuns() {
+        if (!runList) return;
+        fetch(getBaseURL() + '/runs')
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                renderRunOptions(data);
+                var current = (data.current_run || {}).name;
+                setRunStatus(current ? 'Current run: ' + current : 'No current run saved yet.', false);
+            })
+            .catch(function (e) {
+                setRunStatus('Could not list runs: ' + e.message, true);
+            });
+    }
+
+    function saveRun() {
+        var name = safeSaveName(runName && runName.value || runList && runList.value || 'main_run');
+        setRunStatus('Saving run ' + name + '...', false);
+        fetch(getBaseURL() + '/runs/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function () {
+                addLog('key-moment', 'Saved run: ' + name);
+                setRunStatus('Saved run ' + name, false);
+                refreshRuns();
+                refreshSaves();
+            })
+            .catch(function (e) {
+                addLog('error', 'Run save failed: ' + e.message);
+                setRunStatus('Run save failed: ' + e.message, true);
+            });
+    }
+
+    function loadRun() {
+        if (!runList || !runList.value) {
+            setRunStatus('Choose a run to load.', true);
+            return;
+        }
+        var name = runList.value;
+        setRunStatus('Loading run ' + name + '...', false);
+        fetch(getBaseURL() + '/runs/load', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                addLog('key-moment', 'Loaded run: ' + name);
+                setRunStatus('Loaded run ' + name, false);
+                if (data && data.state_after) renderStats(data.state_after);
+                refreshRuns();
+                pollScreenshot();
+            })
+            .catch(function (e) {
+                addLog('error', 'Run load failed: ' + e.message);
+                setRunStatus('Run load failed: ' + e.message, true);
+            });
+    }
+
+    function newRun() {
+        var name = safeSaveName(runName && runName.value || 'new_run');
+        setRunStatus('Starting new run ' + name + '...', false);
+        fetch(getBaseURL() + '/runs/new', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, save_current: true })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                addLog('key-moment', 'Started new run: ' + name);
+                setRunStatus('Started new run ' + name, false);
+                if (data && data.state_after) renderStats(data.state_after);
+                if (data && data.screenshot_after && data.screenshot_after.image) renderGameScreen(data.screenshot_after.image, 'action');
+                refreshRuns();
+                refreshSaves();
+            })
+            .catch(function (e) {
+                addLog('error', 'New run failed: ' + e.message);
+                setRunStatus('New run failed: ' + e.message, true);
+            });
+    }
+
+    function refreshSaves() {
+        if (!saveList) return;
+        fetch(getBaseURL() + '/saves')
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                var saves = data.saves || [];
+                saveList.innerHTML = '';
+                if (!saves.length) {
+                    var empty = document.createElement('option');
+                    empty.value = '';
+                    empty.textContent = 'No saves yet';
+                    saveList.appendChild(empty);
+                    return;
+                }
+                saves.sort(function (a, b) { return (b.modified || 0) - (a.modified || 0); });
+                saves.forEach(function (item) {
+                    var opt = document.createElement('option');
+                    opt.value = item.name;
+                    var when = item.modified ? new Date(item.modified * 1000).toLocaleString() : 'unknown time';
+                    opt.textContent = item.name + ' · ' + when;
+                    saveList.appendChild(opt);
+                });
+            })
+            .catch(function (e) {
+                setSaveStatus('Could not list saves: ' + e.message, true);
+            });
+    }
+
+    function saveState() {
+        var name = safeSaveName(saveName && saveName.value);
+        setSaveStatus('Saving ' + name + '...', false);
+        fetch(getBaseURL() + '/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function () {
+                addLog('key-moment', 'Saved state: ' + name);
+                setSaveStatus('Saved ' + name, false);
+                refreshSaves();
+            })
+            .catch(function (e) {
+                addLog('error', 'Save failed: ' + e.message);
+                setSaveStatus('Save failed: ' + e.message, true);
+            });
+    }
+
+    function loadState() {
+        if (!saveList || !saveList.value) {
+            setSaveStatus('Choose a save to load.', true);
+            return;
+        }
+        var name = saveList.value;
+        setSaveStatus('Loading ' + name + '...', false);
+        fetch(getBaseURL() + '/load', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                addLog('key-moment', 'Loaded state: ' + name);
+                setSaveStatus('Loaded ' + name, false);
+                if (data && data.state_after) renderStats(data.state_after);
+                pollScreenshot();
+            })
+            .catch(function (e) {
+                addLog('error', 'Load failed: ' + e.message);
+                setSaveStatus('Load failed: ' + e.message, true);
+            });
+    }
+
+    // --- Manual Controls ---
+    function sendAction(action) {
+        if (!action) return;
+        addLog('action', '⇢ manual ' + action);
+        fetch(getBaseURL() + '/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ actions: [action] })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                if (data && data.state_after) {
+                    renderStats(data.state_after);
+                }
+                if (data && data.screenshot_after && data.screenshot_after.image) {
+                    renderGameScreen(data.screenshot_after.image, 'action');
+                } else {
+                    pollScreenshot();
+                }
+            })
+            .catch(function (e) {
+                addLog('error', 'Manual control failed: ' + e.message);
+            });
+    }
+
+    function bindControls() {
+        var buttons = document.querySelectorAll('[data-action]');
+        for (var i = 0; i < buttons.length; i++) {
+            buttons[i].addEventListener('click', function (evt) {
+                sendAction(evt.currentTarget.getAttribute('data-action'));
+            });
+        }
+
+        document.addEventListener('keydown', function (evt) {
+            if (evt.repeat) return;
+            var tag = (evt.target && evt.target.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+
+            var action = null;
+            switch (evt.key) {
+                case 'ArrowUp': case 'w': case 'W': action = 'walk_up'; break;
+                case 'ArrowDown': case 's': case 'S': action = 'walk_down'; break;
+                case 'ArrowLeft': case 'a': case 'A': action = 'walk_left'; break;
+                case 'ArrowRight': case 'd': case 'D': action = 'walk_right'; break;
+                case 'j': case 'J': action = 'press_a'; break;
+                case 'k': case 'K': case 'Backspace': action = 'press_b'; break;
+                case 'Enter': action = 'press_start'; break;
+                case 'Shift': action = 'press_select'; break;
+                case ' ': action = 'wait_60'; break;
+            }
+            if (action) {
+                evt.preventDefault();
+                sendAction(action);
+            }
+        });
     }
 
     // --- Auto-scroll ---
@@ -536,6 +1145,45 @@
         addLog('status', 'Log cleared');
     });
 
+    if (btnBotToggle) {
+        btnBotToggle.addEventListener('click', function () {
+            updateAutoplayerControl({ enabled: !botEnabled });
+        });
+    }
+
+    if (botEngine) {
+        botEngine.addEventListener('change', function () {
+            updateAutoplayerControl({ engine: botEngine.value });
+            addLog('status', 'Bot engine set to ' + botEngine.options[botEngine.selectedIndex].text);
+        });
+    }
+
+    if (botBias) {
+        botBias.addEventListener('change', function () {
+            updateAutoplayerControl({ movement_bias: botBias.value });
+        });
+    }
+
+    if (botObjective) {
+        botObjective.addEventListener('change', function () {
+            updateAutoplayerControl({ objective: botObjective.value });
+        });
+    }
+
+    if (btnBotGuidance && botGuidance) {
+        btnBotGuidance.addEventListener('click', function () {
+            updateAutoplayerControl({ guidance_prompt: botGuidance.value });
+            addLog('thinking', 'Guidance sent: ' + (botGuidance.value || '(cleared)'));
+        });
+    }
+
+    if (btnSaveState) btnSaveState.addEventListener('click', saveState);
+    if (btnLoadState) btnLoadState.addEventListener('click', loadState);
+    if (btnRefreshSaves) btnRefreshSaves.addEventListener('click', refreshSaves);
+    if (btnSaveRun) btnSaveRun.addEventListener('click', saveRun);
+    if (btnLoadRun) btnLoadRun.addEventListener('click', loadRun);
+    if (btnNewRun) btnNewRun.addEventListener('click', newRun);
+
     // --- Corner bracket decorations (bottom corners) ---
     function addBottomCorners() {
         var frame = document.querySelector('.game-screen-frame');
@@ -546,6 +1194,196 @@
         br.className = 'corner-br';
         frame.appendChild(bl);
         frame.appendChild(br);
+    }
+
+    // --- Customizable layout ---
+    function loadDashboardLayout() {
+        try {
+            var raw = window.localStorage.getItem(DASHBOARD_LAYOUT_KEY);
+            if (!raw) return { version: 1, order: DEFAULT_SECTION_ORDER.slice(), leftOrder: DEFAULT_LEFT_SECTION_ORDER.slice(), collapsed: {}, heights: {}, leftWidth: null };
+            var parsed = JSON.parse(raw);
+            if (!parsed || parsed.version !== 1) throw new Error('unsupported layout');
+            parsed.order = Array.isArray(parsed.order) ? parsed.order.filter(function (id) { return DEFAULT_SECTION_ORDER.indexOf(id) !== -1; }) : [];
+            DEFAULT_SECTION_ORDER.forEach(function (id) {
+                if (parsed.order.indexOf(id) === -1) parsed.order.push(id);
+            });
+            parsed.leftOrder = Array.isArray(parsed.leftOrder) ? parsed.leftOrder.filter(function (id) { return DEFAULT_LEFT_SECTION_ORDER.indexOf(id) !== -1; }) : [];
+            DEFAULT_LEFT_SECTION_ORDER.forEach(function (id) {
+                if (parsed.leftOrder.indexOf(id) === -1) parsed.leftOrder.push(id);
+            });
+            parsed.collapsed = parsed.collapsed || {};
+            parsed.heights = parsed.heights || {};
+            return parsed;
+        } catch (_) {
+            return { version: 1, order: DEFAULT_SECTION_ORDER.slice(), leftOrder: DEFAULT_LEFT_SECTION_ORDER.slice(), collapsed: {}, heights: {}, leftWidth: null };
+        }
+    }
+
+    function saveDashboardLayout(layout) {
+        try {
+            window.localStorage.setItem(DASHBOARD_LAYOUT_KEY, JSON.stringify(layout));
+        } catch (_) {
+            // Layout persistence is optional.
+        }
+    }
+
+    function sectionById(id) {
+        return document.querySelector('[data-section-id="' + id + '"]');
+    }
+
+    function currentSectionOrder(parent) {
+        return Array.prototype.slice.call(parent.querySelectorAll(':scope > .dashboard-section')).map(function (section) {
+            return section.dataset.sectionId;
+        }).filter(Boolean);
+    }
+
+    function makeSectionButton(label, title, handler) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'section-btn';
+        button.textContent = label;
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        button.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            handler();
+        });
+        return button;
+    }
+
+    function applySectionOrder(parent, order) {
+        if (!parent) return;
+        order.forEach(function (id) {
+            var section = sectionById(id);
+            if (section) parent.appendChild(section);
+        });
+    }
+
+    function orderKeyForParent(parent) {
+        return parent && parent.classList.contains('log-panel') ? 'leftOrder' : 'order';
+    }
+
+    function moveSection(section, direction, layout) {
+        var parent = section.parentElement;
+        var sections = Array.prototype.slice.call(parent.querySelectorAll(':scope > .dashboard-section'));
+        var index = sections.indexOf(section);
+        var targetIndex = index + direction;
+        if (index < 0 || targetIndex < 0 || targetIndex >= sections.length) return;
+        if (direction < 0) {
+            parent.insertBefore(section, sections[targetIndex]);
+        } else {
+            parent.insertBefore(sections[targetIndex], section);
+        }
+        layout[orderKeyForParent(parent)] = currentSectionOrder(parent);
+        saveDashboardLayout(layout);
+    }
+
+    function initSectionControls(section, layout) {
+        var id = section.dataset.sectionId;
+        var title = section.dataset.sectionTitle || id;
+        var header = section.querySelector(':scope > .panel-header');
+        var toolbar = document.createElement('div');
+        toolbar.className = 'section-toolbar';
+        if (!header) {
+            var titleEl = document.createElement('span');
+            titleEl.className = 'section-toolbar-title';
+            titleEl.textContent = title;
+            toolbar.appendChild(titleEl);
+        }
+        var collapseButton = makeSectionButton(layout.collapsed[id] ? '+' : '−', 'Collapse or expand ' + title, function () {
+            var collapsed = section.classList.toggle('section-collapsed');
+            collapseButton.textContent = collapsed ? '+' : '−';
+            layout.collapsed[id] = collapsed;
+            saveDashboardLayout(layout);
+        });
+        toolbar.appendChild(collapseButton);
+        toolbar.appendChild(makeSectionButton('↑', 'Move ' + title + ' up', function () { moveSection(section, -1, layout); }));
+        toolbar.appendChild(makeSectionButton('↓', 'Move ' + title + ' down', function () { moveSection(section, 1, layout); }));
+        toolbar.appendChild(makeSectionButton('↕', 'Reset ' + title + ' height', function () {
+            section.style.height = '';
+            delete layout.heights[id];
+            saveDashboardLayout(layout);
+        }));
+        if (header) header.appendChild(toolbar);
+        else section.insertBefore(toolbar, section.firstChild);
+
+        var resize = document.createElement('div');
+        resize.className = 'section-resize-handle';
+        resize.title = 'Drag to resize ' + title;
+        section.appendChild(resize);
+        resize.addEventListener('pointerdown', function (event) {
+            if (section.classList.contains('section-collapsed')) return;
+            event.preventDefault();
+            resize.classList.add('resizing');
+            resize.setPointerCapture(event.pointerId);
+            var startY = event.clientY;
+            var startHeight = section.getBoundingClientRect().height;
+            function onMove(moveEvent) {
+                var next = Math.max(52, Math.min(1100, startHeight + moveEvent.clientY - startY));
+                section.style.height = Math.round(next) + 'px';
+            }
+            function onUp(upEvent) {
+                resize.classList.remove('resizing');
+                resize.releasePointerCapture(upEvent.pointerId);
+                resize.removeEventListener('pointermove', onMove);
+                resize.removeEventListener('pointerup', onUp);
+                layout.heights[id] = section.style.height;
+                saveDashboardLayout(layout);
+            }
+            resize.addEventListener('pointermove', onMove);
+            resize.addEventListener('pointerup', onUp);
+        });
+    }
+
+    function initMainColumnResize(layout) {
+        var grid = $('mainGrid');
+        var handle = $('mainResizeHandle');
+        if (!grid || !handle) return;
+        if (layout.leftWidth) document.documentElement.style.setProperty('--dashboard-left-width', layout.leftWidth);
+        handle.addEventListener('pointerdown', function (event) {
+            event.preventDefault();
+            handle.classList.add('resizing');
+            handle.setPointerCapture(event.pointerId);
+            var rect = grid.getBoundingClientRect();
+            function onMove(moveEvent) {
+                var percent = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+                percent = Math.max(16, Math.min(82, percent));
+                var value = percent.toFixed(1) + '%';
+                document.documentElement.style.setProperty('--dashboard-left-width', value);
+            }
+            function onUp(upEvent) {
+                handle.classList.remove('resizing');
+                try { handle.releasePointerCapture(upEvent.pointerId); } catch (_) {}
+                document.removeEventListener('pointermove', onMove);
+                document.removeEventListener('pointerup', onUp);
+                layout.leftWidth = getComputedStyle(document.documentElement).getPropertyValue('--dashboard-left-width').trim();
+                saveDashboardLayout(layout);
+            }
+            document.addEventListener('pointermove', onMove);
+            document.addEventListener('pointerup', onUp);
+        });
+    }
+
+    function initDashboardLayout() {
+        var layout = loadDashboardLayout();
+        applySectionOrder(document.querySelector('.game-panel'), layout.order);
+        applySectionOrder(document.querySelector('.log-panel'), layout.leftOrder);
+        DEFAULT_SECTION_ORDER.forEach(function (id) {
+            var section = sectionById(id);
+            if (!section) return;
+            if (layout.collapsed[id]) section.classList.add('section-collapsed');
+            if (layout.heights[id]) section.style.height = layout.heights[id];
+            initSectionControls(section, layout);
+        });
+        DEFAULT_LEFT_SECTION_ORDER.forEach(function (id) {
+            var section = sectionById(id);
+            if (!section) return;
+            if (layout.collapsed[id]) section.classList.add('section-collapsed');
+            if (layout.heights[id]) section.style.height = layout.heights[id];
+            initSectionControls(section, layout);
+        });
+        initMainColumnResize(layout);
     }
 
     // --- Health check on startup ---
@@ -568,13 +1406,18 @@
     // --- Init ---
     function init() {
         addBottomCorners();
+        initDashboardLayout();
+        startRTC();
         setStatus(false, 'Connecting...');
         addLog('status', 'Hermes Plays Pokémon Dashboard loaded');
         addLog('status', 'Connecting to server...');
 
         checkHealth();
         connectWS();
+        connectWatchStats();
+        bindControls();
         startPolling();
+        setInterval(pollWatchStatus, 10000);
     }
 
     // Wait for DOM

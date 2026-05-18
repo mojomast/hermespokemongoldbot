@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hermes Plays Pokemon Gold - Live</title>
+    <link rel="stylesheet" href="watch.css?v=2">
+</head>
+<body>
+    <main class="watch-shell">
+        <section class="hero-card">
+            <div class="hero-copy">
+                <p class="eyebrow">Hermes Game Boy Color Broadcast</p>
+                <h1>Hermes Plays Pokemon Gold</h1>
+                <p class="subtitle">A read-only live stream of Hermes thinking, walking, bumping into walls, and slowly becoming Johto's problem.</p>
+            </div>
+            <div class="hero-status-stack">
+                <div class="connection" id="connectionStatus">Connecting...</div>
+                <div class="viewer-pill"><span id="viewerCount">0</span> live viewers</div>
+            </div>
+        </section>
+
+        <section class="stream-grid">
+            <div class="screen-card">
+                <div class="screen-label"><span>DOT MATRIX WITH STEREO SOUND</span><span>ON AIR</span></div>
+                <div class="screen-bezel">
+                    <video id="gameStream" class="game-stream" autoplay playsinline muted></video>
+                    <img id="fallbackScreen" class="fallback-screen hidden" alt="Pokemon game screen">
+                    <div id="streamOverlay" class="stream-overlay">Booting Hermes video link...</div>
+                </div>
+                <div class="chat-panel console-chat">
+                    <div class="console-chat-title">Live Viewer Chat</div>
+                    <div id="chatLog" class="chat-log">
+                        <div class="chat-entry muted">Connecting chat...</div>
+                    </div>
+                    <form id="chatForm" class="chat-form">
+                        <input id="chatName" maxlength="24" placeholder="name" autocomplete="nickname">
+                        <input id="chatMessage" maxlength="280" placeholder="chat with other viewers" autocomplete="off">
+                        <button type="submit">Send</button>
+                    </form>
+                </div>
+                <div class="console-footer">
+                    <div class="speaker-grille" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+                    <div class="brand-lockup">HERMES COLOR</div>
+                    <div class="button-cluster" aria-hidden="true"><span>B</span><span>A</span></div>
+                </div>
+                <div class="stream-note">Tap once for audio.</div>
+            </div>
+
+            <aside class="status-card">
+                <div class="section-heading">Hermes Action Deck</div>
+                <div class="now-action">
+                    <span>Current Move</span>
+                    <strong id="actionValue">--</strong>
+                </div>
+                <div class="objective-box">
+                    <span>Mission</span>
+                    <p id="objectiveValue">Loading...</p>
+                </div>
+                <div class="metric-grid">
+                    <div><span>Engine</span><strong id="engineValue">--</strong></div>
+                    <div><span>Phase</span><strong id="phaseValue">--</strong></div>
+                    <div><span>Turn</span><strong id="turnValue">--</strong></div>
+                    <div><span>Map</span><strong id="mapValue">--</strong></div>
+                    <div><span>Position</span><strong id="positionValue">--</strong></div>
+                    <div><span>Status</span><strong>LIVE</strong></div>
+                </div>
+                <div class="diagnostics-box" id="diagnosticsValue">Diagnostics loading...</div>
+                <div class="log-panel">
+                    <div class="section-heading small">Bot Thought Process</div>
+                    <div id="botLog" class="bot-log">
+                        <div class="log-entry muted">Waiting for bot telemetry...</div>
+                    </div>
+                </div>
+            </aside>
+        </section>
+    </main>
+    <script src="watch.js?v=2"></script>
+</body>
+</html>

@@ -143,7 +143,16 @@ class PyBoyEmulator(Emulator):
         if not os.path.isfile(rom_path):
             raise FileNotFoundError(f"ROM not found: {rom_path}")
 
-        self._pyboy = PyBoy(rom_path, window="null")
+        self._pyboy = PyBoy(
+            rom_path,
+            window="null",
+            sound_emulated=True,
+            sound_sample_rate=48000,
+            sound_volume=100,
+        )
+        # The server owns real-time pacing. PyBoy's default 1x throttle makes
+        # multi-frame action calls block the event loop and stutter WebRTC.
+        self._pyboy.set_emulation_speed(0)
         self.rom_path = rom_path
         self.frame_count = 0
 
@@ -171,6 +180,20 @@ class PyBoyEmulator(Emulator):
         self.tick(frames)
         pb.button_release(button)  # type: ignore[union-attr]
 
+    def button_down(self, button: str) -> None:
+        """Press a button without advancing emulation."""
+        button = button.lower()
+        if button not in self.BUTTONS:
+            raise ValueError(f"Unknown button '{button}'. Valid: {self.BUTTONS}")
+        self._pyboy.button_press(button)  # type: ignore[union-attr]
+
+    def button_up(self, button: str) -> None:
+        """Release a button without advancing emulation."""
+        button = button.lower()
+        if button not in self.BUTTONS:
+            raise ValueError(f"Unknown button '{button}'. Valid: {self.BUTTONS}")
+        self._pyboy.button_release(button)  # type: ignore[union-attr]
+
     def release_all(self) -> None:
         """Release all buttons."""
         pb = self._pyboy
@@ -194,6 +217,18 @@ class PyBoyEmulator(Emulator):
     def get_screen(self) -> "Image.Image":
         """Return current screen as a PIL Image (160×144)."""
         return self._pyboy.screen.image  # type: ignore[union-attr]
+
+    def get_audio_samples(self):
+        """Return the latest PyBoy audio buffer as a NumPy array.
+
+        PyBoy exposes one stereo int8 buffer per emulated frame. Callers must
+        copy if they need to retain samples across ticks.
+        """
+        return self._pyboy.sound.ndarray.copy()  # type: ignore[union-attr]
+
+    def get_audio_sample_rate(self) -> int:
+        """Return the PyBoy audio sample rate."""
+        return int(self._pyboy.sound.sample_rate)  # type: ignore[union-attr]
 
     # -- memory -------------------------------------------------------------
 
