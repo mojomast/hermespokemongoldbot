@@ -1,266 +1,171 @@
-# 🎮 pokemon-agent
+# Hermes Pokemon Gold Bot
 
-**AI-powered Pokémon gameplay agent with headless emulation, REST API, and live dashboard.**
+Hermes Pokemon Gold Bot is a Pokemon Gold autonomous gameplay stack built from
+the `pokemon-agent` emulator/API project and evolved through Hermes Agent's
+`pokemon-player` skill workflow. It runs Pokemon Gold headlessly with PyBoy,
+serves game state and controls over HTTP, exposes a live dashboard/watch page,
+and includes Gold-specific memory reading, navigation, battle/gameplay policy,
+and V1/V2 autoplayer experiments.
 
-Let any AI agent — [Hermes Agent](https://github.com/NousResearch/hermes-agent), Claude Code, Codex, or your own — play Pokémon games autonomously via a clean HTTP API. Runs headlessly on any server or terminal. No display, no GUI, no emulator window needed.
-
-```
-┌──────────────────────┐
-│   Your AI Agent      │  Any LLM-powered agent
-│   (Hermes, Claude,   │  makes the decisions
-│    Codex, custom)    │
-└─────────┬────────────┘
-          │ HTTP API
-┌─────────▼────────────┐
-│   pokemon-agent      │  This package:
-│   ┌────────────────┐ │  - Headless emulator
-│   │ Game Server    │ │  - Memory reader
-│   │ (FastAPI)      │ │  - Game state parser
-│   ├────────────────┤ │  - REST + WebSocket API
-│   │ Emulator       │ │  - Optional dashboard
-│   │ (PyBoy/PyGBA)  │ │
-│   └────────────────┘ │
-└──────────────────────┘
-```
+This repository is focused on the Gold bot work published at
+`github.com/mojomast/hermespokemongoldbot`. It is not a ROM distribution.
 
 ## Features
 
-- **🔌 Headless emulation** — No display server, X11, or GUI needed. Pure in-process emulation.
-- **🌐 REST API** — `GET /state`, `POST /action`, `GET /screenshot` — control the game over HTTP.
-- **📡 WebSocket** — Real-time event streaming for live monitoring.
-- **🧠 Structured game state** — RAM is parsed into clean JSON: party, bag, badges, map, battle, dialog.
-- **🎨 Live dashboard** — Optional web GUI to watch the AI play (Claude Plays Pokémon style).
-- **🎮 Multi-game** — Supports Game Boy (Pokémon Red/Blue) via PyBoy, GBA (FireRed) via PyGBA.
-- **🤖 Agent-agnostic** — Works with any AI agent, RL framework, or custom script.
+- Headless Game Boy Color emulation through PyBoy.
+- FastAPI control server with state, screenshot, action, save/load, run, and bot
+  control endpoints.
+- Smooth WebRTC live stream plus screenshot fallback.
+- Read-only public watch page with live viewer count, chat, bot telemetry, and a
+  Game Boy Color-styled broadcast UI.
+- Full local control dashboard for manual controls, bot guidance, saves, runs,
+  inventory, team, battle state, and diagnostics.
+- Pokemon Gold RAM reader for structured state such as map, position, party,
+  bag, battle, story flags, and visual/dialogue signals.
+- Gold V1/V2 autoplayer runners, supervisor service, route planner, gameplay
+  policies, and regression tests.
 
-## Quick Start
+## Requirements
 
-### Installation
+- Python 3.10+
+- PyBoy-compatible Pokemon Gold `.gbc` ROM that you legally own
+- Project dependencies from `pyproject.toml`
 
-```bash
-# Core (emulator + API server)
-pip install pokemon-agent pyboy
-
-# With dashboard (optional web GUI)
-pip install pokemon-agent[dashboard] pyboy
-```
-
-> **Note:** You must provide your own ROM file. This package does not include any game ROMs.
-
-### Start the Server
+## Setup
 
 ```bash
-pokemon-agent serve --rom path/to/pokemon_red.gb
+git clone https://github.com/mojomast/hermespokemongoldbot.git
+cd hermespokemongoldbot
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[pyboy,dashboard,dev]"
 ```
 
-```
-╔══════════════════════════════════════╗
-║       🎮 Pokémon Agent Server       ║
-╚══════════════════════════════════════╝
-  Game:       Pokemon Red
-  ROM:        pokemon_red.gb
-  API:        http://localhost:8765
-  Dashboard:  http://localhost:8765/dashboard
-  WebSocket:  ws://localhost:8765/ws
-```
-
-### Play from Any Agent
+## Run Pokemon Gold
 
 ```bash
-# Get game state
-curl http://localhost:8765/state | python -m json.tool
-
-# Take a screenshot
-curl http://localhost:8765/screenshot -o screen.png
-
-# Send actions
-curl -X POST http://localhost:8765/action \
-  -H "Content-Type: application/json" \
-  -d '{"actions": ["walk_up", "walk_up", "press_a"]}'
-
-# Save/load state
-curl -X POST http://localhost:8765/save -d '{"name": "before_brock"}'
-curl -X POST http://localhost:8765/load -d '{"name": "before_brock"}'
+./start_pokemon_gold.sh /path/to/pokemon_gold.gbc
 ```
 
-### Game State (JSON)
+Defaults used by the helper script:
 
-```json
-{
-  "player": {
-    "name": "ASH",
-    "money": 3000,
-    "badges": 1,
-    "badges_list": ["Boulder"],
-    "position": {"map_id": 1, "map_name": "PALLET TOWN", "x": 7, "y": 5},
-    "facing": "down",
-    "play_time": {"hours": 1, "minutes": 23, "seconds": 45}
-  },
-  "party": [
-    {
-      "nickname": "SQUIRTLE",
-      "species": "Squirtle",
-      "level": 12,
-      "hp": 33,
-      "max_hp": 33,
-      "moves": ["Tackle", "Tail Whip", "Bubble"],
-      "status": null,
-      "types": ["Water"]
-    }
-  ],
-  "bag": [{"item": "Potion", "quantity": 3}],
-  "battle": null,
-  "dialog": {"active": false, "text": null},
-  "flags": {"has_pokedex": true, "badges_earned": ["Boulder"]},
-  "metadata": {"game": "Pokemon Red", "frame_count": 12345}
-}
-```
+- ROM: `/home/mojo/roms/pokemon_gold.gbc`
+- Port: `9876` unless `POKEMON_AGENT_PORT` is set
+- Data dir: `/home/mojo/.pokemon-agent-gold` unless `POKEMON_AGENT_DATA_DIR` is set
 
-## Actions Reference
-
-| Action | Description |
-|--------|-------------|
-| `press_a` | Press A button (10 frames press + 20 wait) |
-| `press_b` | Press B button |
-| `press_start` | Press Start button |
-| `press_select` | Press Select button |
-| `walk_up` | Walk one tile up (16 frames + 8 wait) |
-| `walk_down` | Walk one tile down |
-| `walk_left` | Walk one tile left |
-| `walk_right` | Walk one tile right |
-| `hold_a_30` | Hold A for 30 frames |
-| `wait_60` | Wait 60 frames (~1 second) |
-| `a_until_dialog_end` | Press A repeatedly until dialog closes |
-
-## Dashboard
-
-Install with the dashboard extra to get a live web GUI:
+You can also run the server directly:
 
 ```bash
-pip install pokemon-agent[dashboard]
+pokemon-agent serve \
+  --rom /path/to/pokemon_gold.gbc \
+  --port 9876 \
+  --data-dir /home/mojo/.pokemon-agent-gold
 ```
 
-Then open `http://localhost:8765/dashboard` in your browser.
+## Watch And Control
 
-The dashboard shows:
-- **Live game screenshot** — Updated each turn with decorative corner brackets
-- **AI reasoning stream** — Watch the agent think in real-time
-- **Team status** — All party Pokémon with HP bars, types, levels
-- **Badge progress** — Visual badge tracker
-- **Action log** — Color-coded history of all actions and reasoning
+Local endpoints after the server starts:
 
-## Supported Games
+- Full control dashboard: `http://localhost:9876/dashboard/`
+- Read-only live viewer: `http://localhost:9876/dashboard/watch.html`
+- Health: `http://localhost:9876/health`
+- Structured state: `http://localhost:9876/state`
+- Watch status: `http://localhost:9876/watch/status`
+- Watch chat/viewer WebSocket: `ws://localhost:9876/watch/ws`
+- WebRTC offer endpoint: `POST /rtc/offer`
 
-| Game | Emulator | Status | Install |
-|------|----------|--------|---------|
-| Pokémon Red/Blue | PyBoy | ✅ Supported | `pip install pyboy` |
-| Pokémon Yellow | PyBoy | ✅ Supported | `pip install pyboy` |
-| Pokémon Gold/Silver | PyBoy | 🔜 Planned | `pip install pyboy` |
-| Pokémon FireRed/LeafGreen | PyGBA | 🔜 Phase 2 | `pip install pygba` |
-| Pokémon Ruby/Sapphire/Emerald | PyGBA | 🔜 Phase 2 | `pip install pygba` |
+For a temporary public read-only viewer tunnel:
 
-## Use with Hermes Agent
-
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) has a built-in `pokemon-player` skill:
-
-```
-You: "Play Pokémon Red"
-Hermes: *installs pokemon-agent, starts server, begins playing*
+```bash
+POKEMON_AGENT_PORT=9876 ./start_pokemon_tunnel.sh
 ```
 
-The skill teaches Hermes battle strategy, exploration patterns, team management, and how to use its persistent memory for tracking objectives across sessions.
+The tunnel helper uses `localhost.run`, writes its log to
+`/tmp/pokemon-localhost-run.log` by default, and prints a temporary `*.lhr.life`
+URL. Share the URL with `/dashboard/watch.html` appended. Do not share
+`/dashboard/` publicly unless you intentionally want to expose controls.
 
-## API Reference
+## Autoplayer
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Server info |
-| `/state` | GET | Full game state JSON |
-| `/screenshot` | GET | Current frame (PNG) |
-| `/screenshot/base64` | GET | Current frame (base64 JSON) |
-| `/action` | POST | Execute game actions |
-| `/save` | POST | Save emulator state |
-| `/load` | POST | Load emulator state |
-| `/saves` | GET | List saved states |
-| `/minimap` | GET | ASCII minimap |
-| `/health` | GET | Health check |
-| `/ws` | WebSocket | Live event stream |
-| `/dashboard` | GET | Web dashboard (if installed) |
+The Gold bot has multiple cooperating runners:
 
-## Python API
+- `gold_autoplayer.py`: V1 visual/RAM hybrid controller.
+- `gold_autoplayer_v2.py`: V2 route-planning and gameplay-policy runner.
+- `gold_autoplayer_service.py`: supervisor that starts/stops the selected engine.
+- `gold_autoplayer_watch.py`: status watcher for terminal monitoring.
 
-You can also use `pokemon-agent` as a library:
+Runtime control and status files are stored under the configured data directory,
+typically `/home/mojo/.pokemon-agent-gold/`:
 
-```python
-from pokemon_agent.emulator import create_emulator
-from pokemon_agent.memory.red import PokemonRedReader
-from pokemon_agent.state.builder import build_game_state
+- `gold_autoplayer_control.json`
+- `gold_autoplayer_status.json`
+- `gold_autoplayer_supervisor_status.json`
+- `gold_autoplayer_v2.jsonl`
 
-# Load ROM headlessly
-emu = create_emulator("pokemon_red.gb")
+## API Quick Reference
 
-# Create memory reader
-reader = PokemonRedReader(emu)
+- `GET /health`: server health and emulator readiness.
+- `GET /state`: structured game state.
+- `GET /screenshot`: current frame as PNG.
+- `POST /action`: execute actions such as `press_a`, `walk_right`,
+  `hold_right_48`, or `wait_60`.
+- `POST /save`, `POST /load`, `GET /saves`: raw emulator save states.
+- `GET /runs`, `POST /runs/save`, `POST /runs/load`, `POST /runs/new`: named run
+  snapshots.
+- `GET /autoplayer/status`: bot control/status/telemetry payload.
+- `POST /autoplayer/control`: enable/disable the bot and select V1/V2 settings.
+- `GET /rtc/debug/perf`: WebRTC media pump diagnostics.
+- `GET /watch/status`, `WS /watch/ws`: viewer count and shared watch chat.
 
-# Get structured game state
-state = build_game_state(reader)
-print(f"Player: {state['player']['name']}")
-print(f"Badges: {state['player']['badges']}")
-print(f"Party: {[p['species'] for p in state['party']]}")
+## Tests
 
-# Send inputs
-emu.press("a", frames=10)
-emu.tick(20)
-
-# Get screenshot
-image = emu.get_screen()  # PIL Image
-image.save("screenshot.png")
+```bash
+python -m pytest
 ```
 
-## Architecture
+Useful targeted runs:
 
-```
-pokemon_agent/
-├── __init__.py          # Package version
-├── cli.py               # CLI entry point (pokemon-agent command)
-├── server.py            # FastAPI game server (REST + WebSocket)
-├── emulator.py          # PyBoy/PyGBA wrapper (headless)
-├── pathfinding.py       # A* grid navigation
-├── memory/
-│   ├── reader.py        # Abstract game memory reader
-│   ├── red.py           # Pokémon Red/Blue RAM parser
-│   └── firered.py       # FireRed RAM parser (Phase 2)
-├── state/
-│   └── builder.py       # Structured state builder
-└── dashboard/           # Optional [dashboard] extra
-    ├── mount.py         # FastAPI static mount
-    ├── history.py       # JSONL event logger
-    └── static/
-        ├── index.html   # Dashboard page
-        ├── style.css    # Dark cyberpunk theme
-        └── app.js       # WebSocket client
+```bash
+python -m pytest test_gold_memory.py test_navigation_v2.py test_gameplay_v2.py
+python -m pytest test_gold_autoplayer_v2.py
+python -m py_compile gold_autoplayer_v2.py pokemon_agent/server.py
 ```
 
-## Contributing
+## ROM And Trademark Disclaimer
 
-Contributions welcome! Areas where help is needed:
+This repository does not include, download, distribute, or provide Pokemon ROMs,
+BIOS files, save files containing proprietary game data, or other copyrighted
+game assets. You must supply your own legally obtained Pokemon Gold ROM.
 
-- **Pokémon Gold/Silver/Crystal** memory reader (`memory/gold.py`)
-- **Pokémon FireRed** full memory reader with decryption (`memory/firered.py`)
-- **Pokémon Emerald** memory reader (`memory/emerald.py`)
-- **Battle AI** improvements and type matchup optimization
-- **Dashboard** enhancements (progress tracking, key moments, replay)
-- **Tests** for memory readers and state builders
+Pokemon, Pokemon Gold, Game Boy, and related names/assets are owned by Nintendo,
+Game Freak, Creatures, and/or The Pokemon Company. This project is an independent
+automation/emulation tool and is not affiliated with or endorsed by those
+companies.
+
+## Attribution And Credits
+
+This project stands on several layers of prior work:
+
+- [NousResearch/pokemon-agent](https://github.com/NousResearch/pokemon-agent):
+  the upstream emulator/API/dashboard project this repository is based on. The
+  original project is MIT licensed, Copyright (c) 2026 Nous Research. The MIT
+  license notice is preserved in `LICENSE`.
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) and its built-in
+  `pokemon-player` skill: the agent workflow, dashboard integration, memory
+  conventions, operational playbook, and starting point that this Gold bot grew
+  out of.
+- [PyBoy](https://github.com/Baekalfen/PyBoy): the Game Boy/Game Boy Color
+  emulator used by the server.
+- [FastAPI](https://fastapi.tiangolo.com/) and Uvicorn: the HTTP/WebSocket server
+  foundation.
+- [pret/pokecrystal](https://github.com/pret/pokecrystal) and public Pokemon
+  Gold/Silver RAM/map research: references used for Gold memory/navigation work.
+- [pret/pokered](https://github.com/pret/pokered) and
+  [pret/pokefirered](https://github.com/pret/pokefirered): upstream references
+  credited by the original `pokemon-agent` project.
+- [gpt-play-pokemon-firered](https://github.com/Clad3815/gpt-play-pokemon-firered):
+  architecture inspiration credited by the original `pokemon-agent` project.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-## Acknowledgments
-
-- [PyBoy](https://github.com/Baekalfen/PyBoy) — Game Boy emulator in Python
-- [PyGBA](https://github.com/dvruette/pygba) — GBA emulator wrapper
-- [pret/pokered](https://github.com/pret/pokered) — Pokémon Red decompilation (memory addresses)
-- [pret/pokefirered](https://github.com/pret/pokefirered) — FireRed decompilation
-- [gpt-play-pokemon-firered](https://github.com/Clad3815/gpt-play-pokemon-firered) — Architecture inspiration
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent) — AI agent platform by Nous Research
+MIT. See [LICENSE](LICENSE).
