@@ -16,6 +16,10 @@ MEMORY_CATEGORIES = frozenset({
     "PKM:STUCK",
     "PKM:TEAM",
     "PKM:STRATEGY",
+    "PKM:POLICY",
+    "PKM:RESOURCE",
+    "PKM:FAILURE",
+    "PKM:OUTCOME",
 })
 
 

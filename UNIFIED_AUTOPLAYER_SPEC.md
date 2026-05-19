@@ -39,7 +39,8 @@ the same server/action/learning loop with game-specific plugins.
 - Short action batches with frequent visual verification.
 - Aggressive milestone saves.
 - Persistent memory prefixes such as `PKM:OBJECTIVE`, `PKM:MAP`, `PKM:STUCK`,
-  `PKM:PROGRESS`, `PKM:TEAM`, and `PKM:STRATEGY`.
+  `PKM:PROGRESS`, `PKM:TEAM`, `PKM:STRATEGY`, `PKM:POLICY`, `PKM:RESOURCE`,
+  `PKM:FAILURE`, and `PKM:OUTCOME`.
 - ROM safety policy: never download or distribute ROMs.
 
 ### From Gold V2
@@ -98,6 +99,14 @@ The memory file is JSON and contains append-friendly categorized facts:
 - `PKM:STUCK`: stuck situations and successful fixes.
 - `PKM:TEAM`: party, roles, weaknesses, and desired catches.
 - `PKM:STRATEGY`: battle and routing notes.
+- `PKM:POLICY`: mode handoffs, readiness gates, selected policies, and safety
+  decisions.
+- `PKM:RESOURCE`: money, balls, healing items, HP/level readiness, and restock
+  gates observed from live state.
+- `PKM:FAILURE`: no-action blockers, hard-stuck contexts, API/control failures,
+  and actions that should not be repeated in the same context.
+- `PKM:OUTCOME`: action outcomes, rewards, verification results, and policy
+  effects that future runs may use as fallback/tie-breaker evidence.
 
 The first shared implementation lives in `pokemon_agent.autoplayer.learning`.
 
@@ -105,6 +114,12 @@ V2 also writes a transparent transition-learning file named
 `gold_autoplayer_v2_learning.json`. It tracks reward-shaped action statistics,
 tile visits, and blocked-edge evidence. These values are diagnostic/tie-breaker
 material, not an unchecked replacement for the verified route planner.
+
+Supervisor mode handoffs are mirrored into shared memory as `PKM:POLICY` and, for
+hard-stuck rescues, `PKM:FAILURE`. V2/adaptive also records resource/readiness
+facts when current live state proves the bot is not ready for an objective. Future
+runs may use these facts for explanations, conservative gates, and fallback
+ranking, but current RAM/vision state remains authoritative.
 
 V1 teacher evidence is imported through
 `pokemon_agent.autoplayer.learning.import_gold_v1_teacher_snapshot()`. The import

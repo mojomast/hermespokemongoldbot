@@ -206,3 +206,37 @@ def test_autoplayer_status_warns_on_supervisor_engine_mismatch(tmp_path):
         assert any("engine" in warning.lower() for warning in payload["warnings"])
     finally:
         server._config = previous
+
+
+def test_autoplayer_status_exposes_mode_switch_and_shared_learning(tmp_path):
+    previous = configure_server_data_dir(tmp_path)
+    try:
+        write_json(tmp_path / "gold_autoplayer_control.json", {"engine": "adaptive"})
+        write_json(tmp_path / "gold_autoplayer_status.json", {"engine": "v2"})
+        handoff = {"from": "v1", "to": "adaptive", "reason": "v1_stuck", "path_source": "loop", "updated_at": time.time()}
+        write_json(tmp_path / "gold_autoplayer_supervisor_status.json", {
+            "active_engine": "adaptive",
+            "desired_engine": "adaptive",
+            "child_running": True,
+            "last_handoff": handoff,
+            "updated_at": time.time(),
+        })
+        write_json(tmp_path / "pokemon_learning_memory.json", {
+            "schema_version": 1,
+            "updated_at": time.time(),
+            "facts": [
+                {"category": "PKM:POLICY", "game_id": "gold_silver", "text": "Auto handoff v1 -> adaptive because v1_stuck", "updated_at": time.time(), "data": {"kind": "mode_handoff"}},
+                {"category": "PKM:RESOURCE", "game_id": "gold_silver", "text": "No balls", "updated_at": time.time() - 1, "data": {"kind": "broke_no_balls"}},
+            ],
+        })
+
+        payload = asyncio.run(server.autoplayer_status())
+
+        assert payload["mode_switch"]["selected_engine"] == "adaptive"
+        assert payload["mode_switch"]["active_engine"] == "adaptive"
+        assert payload["mode_switch"]["last_handoff"]["reason"] == "v1_stuck"
+        assert payload["shared_learning"]["counts"]["PKM:POLICY"] == 1
+        assert payload["shared_learning"]["counts"]["PKM:RESOURCE"] == 1
+        assert payload["shared_learning"]["recent_facts"][0]["category"] == "PKM:POLICY"
+    finally:
+        server._config = previous

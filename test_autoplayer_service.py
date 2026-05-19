@@ -252,6 +252,38 @@ def test_supervisor_hands_v2_to_v1_when_hard_stuck(tmp_path):
     assert supervisor_status["last_handoff"]["reason"] == "v2_hard_stuck"
 
 
+def test_supervisor_persists_handoff_as_shared_learning_fact(tmp_path):
+    service = supervisor(tmp_path, FakeFactory())
+    (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({"engine": "v2", "auto_handoff_enabled": True}))
+    write_status(tmp_path, {"engine": "v2", "navigation": {"recovery_level": 2, "path_source": "safety_circuit_breaker"}})
+
+    service.reconcile_once()
+
+    memory = json.loads((tmp_path / "pokemon_learning_memory.json").read_text())
+    policy_facts = [fact for fact in memory["facts"] if fact["category"] == "PKM:POLICY"]
+    failure_facts = [fact for fact in memory["facts"] if fact["category"] == "PKM:FAILURE"]
+    assert policy_facts[-1]["data"]["kind"] == "mode_handoff"
+    assert policy_facts[-1]["data"]["reason"] == "v2_hard_stuck"
+    assert failure_facts[-1]["data"]["kind"] == "mode_handoff_failure"
+
+
+def test_supervisor_hands_v2_to_v1_when_battle_missing_menu_blocks(tmp_path):
+    service = supervisor(tmp_path, FakeFactory())
+    (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({"engine": "adaptive", "auto_handoff_enabled": True}))
+    write_status(tmp_path, {
+        "engine": "v2",
+        "phase": "BATTLE",
+        "actions": [],
+        "navigation": {"path_source": "battle_fallback", "battle_policy": "trainer_fight_blocked_missing_menu_state"},
+    })
+
+    service.reconcile_once()
+
+    control = json.loads((tmp_path / "gold_autoplayer_control.json").read_text())
+    assert control["engine"] == "v1"
+    assert control["auto_handoff"]["reason"] == "adaptive_hard_stuck"
+
+
 def test_supervisor_hands_v1_to_adaptive_when_v1_stuck(tmp_path):
     service = supervisor(tmp_path, FakeFactory())
     (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({"engine": "v1", "auto_handoff_enabled": True}))
@@ -282,7 +314,7 @@ def test_supervisor_handoff_respects_cooldown(tmp_path):
     (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({
         "engine": "v2",
         "auto_handoff_enabled": True,
-        "auto_handoff": {"cooldown_until": 9999999999},
+        "auto_handoff": {"from": "v2", "to": "v1", "cooldown_until": 9999999999},
     }))
     write_status(tmp_path, {"engine": "v2", "navigation": {"recovery_level": 2}})
 
@@ -291,3 +323,20 @@ def test_supervisor_handoff_respects_cooldown(tmp_path):
     control = json.loads((tmp_path / "gold_autoplayer_control.json").read_text())
     assert control["engine"] == "v2"
     assert service.active_engine == "v2"
+
+
+def test_supervisor_cooldown_allows_reciprocal_rescue_handoff(tmp_path):
+    service = supervisor(tmp_path, FakeFactory())
+    (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({
+        "engine": "adaptive",
+        "auto_handoff_enabled": True,
+        "auto_handoff": {"from": "v1", "to": "adaptive", "cooldown_until": 9999999999},
+    }))
+    write_status(tmp_path, {"engine": "v2", "navigation": {"recovery_level": 2}})
+
+    service.reconcile_once()
+
+    control = json.loads((tmp_path / "gold_autoplayer_control.json").read_text())
+    assert control["engine"] == "v1"
+    assert control["auto_handoff"]["from"] == "adaptive"
+    assert control["auto_handoff"]["to"] == "v1"

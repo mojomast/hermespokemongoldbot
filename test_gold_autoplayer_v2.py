@@ -23,6 +23,7 @@ from gold_autoplayer_v2 import (
     choose_healing_item_actions,
     choose_battle_actions,
     posted_actions_for,
+    posted_actions_for_context,
     walk_hold_frames_for_navigation,
     select_route_target,
     verify_single_action,
@@ -354,8 +355,9 @@ def test_v2_records_shared_learning_facts(tmp_path):
 
     shared = json.loads((tmp_path / "pokemon_learning_memory.json").read_text())
     assert shared["facts"]
-    assert shared["facts"][-1]["category"] == "PKM:PROGRESS"
-    assert shared["facts"][-1]["source"] == "v2"
+    progress_facts = [fact for fact in shared["facts"] if fact["category"] == "PKM:PROGRESS"]
+    assert progress_facts
+    assert progress_facts[-1]["source"] == "v2"
 
 
 def test_v2_imports_v1_learning_as_teacher_facts(tmp_path):
@@ -656,7 +658,7 @@ def test_v2_route31_gate_uses_live_entry_from_upper_door_tile():
         2,
         4,
         6,
-        party=[{"slot": 1, "species_id": 158, "level": 9, "hp": 24, "max_hp": 29}],
+        party=[{"slot": 1, "species_id": 158, "level": 12, "hp": 29, "max_hp": 29}],
         flags={
             "derived_story_flags": {
                 "has_starter": True,
@@ -681,7 +683,7 @@ def test_v2_route31_gate_uses_live_entry_from_lower_door_tile():
         2,
         4,
         7,
-        party=[{"slot": 1, "species_id": 158, "level": 9, "hp": 24, "max_hp": 29}],
+        party=[{"slot": 1, "species_id": 158, "level": 12, "hp": 29, "max_hp": 29}],
         flags={
             "derived_story_flags": {
                 "has_starter": True,
@@ -979,7 +981,7 @@ def test_v2_battle_run_sequence_bypasses_button_circuit_breaker():
         2,
         31,
         14,
-        party=[{"slot": 1, "species_id": 158, "level": 8, "hp": 12, "max_hp": 26}],
+        party=[{"slot": 1, "species_id": 158, "level": 12, "hp": 26, "max_hp": 26}],
         battle={"in_battle": True, "type_id": 1, "wild_species_id": 161, "trusted": True},
         menu={"active": False, "confidence": "none", "needs_stronger_decode": True},
         visual={"screen_class": "menu_or_text", "visual_textbox_active": False},
@@ -1419,7 +1421,7 @@ def test_v2_route31_to_violet_mart_ignores_unusable_direct_violet_connection():
         2,
         24,
         17,
-        party=[{"slot": 1, "species_id": 158, "level": 8, "hp": 12, "max_hp": 26}],
+        party=[{"slot": 1, "species_id": 158, "level": 12, "hp": 26, "max_hp": 26}],
         bag=[{"item_id": 0x12, "quantity": 1}],
         flags={
             "derived_story_flags": {
@@ -1463,10 +1465,31 @@ def test_v2_after_starter_routes_violet_gate_to_violet_city():
 
 def test_select_route_target_routes_violet_city_to_gym_before_zephyr():
     target = select_route_target(
-        make_state(10, 5, 39, 24, party=[{"slot": 1, "species_id": 155, "level": 5, "hp": 20, "max_hp": 20}])
+        make_state(
+            10,
+            5,
+            39,
+            24,
+            party=[{"slot": 1, "species_id": 155, "level": 12, "hp": 26, "max_hp": 26}],
+            flags={"derived_story_flags": {"learned_to_catch_pokemon": True, "gave_mystery_egg_to_elm": True}},
+        )
     )
 
     assert target == FALKNER_TARGET
+
+
+def test_select_route_target_grinds_before_falkner_when_underleveled_and_broke():
+    state = make_state(
+        10,
+        5,
+        39,
+        24,
+        party=[{"slot": 1, "species_id": 155, "level": 9, "hp": 26, "max_hp": 26}],
+        flags={"derived_story_flags": {"learned_to_catch_pokemon": True, "gave_mystery_egg_to_elm": True}},
+    )
+    state["player"]["money"] = 13
+
+    assert select_route_target(state) == ROUTE31_GRIND_TARGET
 
 
 def test_select_route_target_stops_after_zephyr_badge():
@@ -1506,7 +1529,14 @@ def test_select_route_target_after_zephyr_routes_azalea_to_slowpoke_well():
 
 def test_v2_violet_city_routes_to_violet_gym_lobby():
     player = GoldAutoplayerV2()
-    state = make_state(10, 5, 39, 24, party=[{"slot": 1, "species_id": 155, "level": 5, "hp": 20, "max_hp": 20}])
+    state = make_state(
+        10,
+        5,
+        39,
+        24,
+        party=[{"slot": 1, "species_id": 155, "level": 12, "hp": 26, "max_hp": 26}],
+        flags={"derived_story_flags": {"learned_to_catch_pokemon": True, "gave_mystery_egg_to_elm": True}},
+    )
 
     actions, nav = player.choose_overworld_actions(state)
 
@@ -1517,7 +1547,14 @@ def test_v2_violet_city_routes_to_violet_gym_lobby():
 
 def test_v2_in_violet_gym_routes_to_falkner():
     player = GoldAutoplayerV2()
-    state = make_state(10, 7, 4, 15, party=[{"slot": 1, "species_id": 155, "level": 5, "hp": 20, "max_hp": 20}])
+    state = make_state(
+        10,
+        7,
+        4,
+        15,
+        party=[{"slot": 1, "species_id": 155, "level": 12, "hp": 26, "max_hp": 26}],
+        flags={"derived_story_flags": {"learned_to_catch_pokemon": True, "gave_mystery_egg_to_elm": True}},
+    )
 
     actions, nav = player.choose_overworld_actions(state)
 
@@ -1527,7 +1564,14 @@ def test_v2_in_violet_gym_routes_to_falkner():
 
 def test_v2_arrived_at_falkner_presses_a():
     player = GoldAutoplayerV2()
-    state = make_state(10, 7, 5, 2, party=[{"slot": 1, "species_id": 155, "level": 5, "hp": 20, "max_hp": 20}])
+    state = make_state(
+        10,
+        7,
+        5,
+        2,
+        party=[{"slot": 1, "species_id": 155, "level": 12, "hp": 26, "max_hp": 26}],
+        flags={"derived_story_flags": {"learned_to_catch_pokemon": True, "gave_mystery_egg_to_elm": True}},
+    )
 
     actions, nav = player.choose_overworld_actions(state)
 
@@ -1568,6 +1612,151 @@ def test_v2_trainer_battle_blocks_without_usable_menu_after_starter():
     assert actions == []
     assert nav["path_source"] == "battle_fallback"
     assert nav["battle_policy"] == "trainer_fight_blocked_missing_menu_state"
+
+
+def test_v2_trainer_battle_missing_menu_uses_safe_fight_sequence():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        26,
+        3,
+        33,
+        7,
+        party=[{"slot": 1, "species_id": 155, "level": 5, "hp": 20, "max_hp": 20}],
+        battle={"in_battle": True, "type_id": 2, "enemy_level": 4, "trusted": True, "enemy_hp": 14, "enemy_hp_trusted": True},
+        visual={"screen_class": "menu_or_text", "visual_textbox_active": False, "bright_lower": 0.812, "dark_lower": 0.175, "lower_contrast_gap": 15.061},
+    )
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions == ["press_b"]
+    assert nav["path_source"] == "battle_fallback"
+    assert nav["battle_policy"] == "trainer_fight_missing_menu_sequence"
+    assert nav["reason"].startswith("trainer battle menu RAM unavailable")
+
+
+def test_v2_trainer_battle_missing_menu_handles_overworld_or_battle_visual_class():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        26,
+        2,
+        18,
+        12,
+        party=[{"slot": 1, "species_id": 155, "level": 8, "hp": 22, "max_hp": 27}],
+        battle={"in_battle": True, "type_id": 2, "enemy_level": 2, "trusted": True, "enemy_hp": 14, "enemy_hp_trusted": True},
+        visual={"screen_class": "overworld_or_battle", "visual_textbox_active": False, "bright_lower": 0.818, "dark_lower": 0.182, "lower_contrast_gap": 33.271},
+    )
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions == ["press_b"]
+    assert nav["battle_policy"] == "trainer_fight_missing_menu_sequence"
+
+
+def test_v2_low_hp_trainer_battle_missing_menu_uses_potion_sequence():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        26,
+        2,
+        18,
+        12,
+        party=[{"slot": 1, "species_id": 155, "level": 8, "hp": 5, "max_hp": 24}],
+        bag=[{"item_id": 18, "quantity": 1}],
+        battle={"in_battle": True, "type_id": 2, "enemy_level": 2, "trusted": True, "enemy_hp": 14, "enemy_hp_trusted": True},
+        visual={"screen_class": "overworld_or_battle", "visual_textbox_active": False, "bright_lower": 0.818, "dark_lower": 0.182, "lower_contrast_gap": 33.271},
+    )
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions == ["press_b"]
+    assert nav["battle_policy"] == "trainer_fight_missing_menu_sequence"
+    assert nav["reason"] == "trainer battle menu RAM unavailable; backing out and forcing Fight/first move"
+
+
+def test_v2_low_hp_single_pokemon_heal_sequence_never_targets_switch_menu():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        26,
+        2,
+        18,
+        12,
+        party=[{"slot": 1, "species_id": 155, "level": 8, "hp": 5, "max_hp": 24}],
+        bag=[{"item_id": 18, "quantity": 1}],
+        battle={"in_battle": True, "type_id": 2, "enemy_level": 2, "trusted": True, "enemy_hp": 14, "enemy_hp_trusted": True},
+        visual={"screen_class": "overworld_or_battle", "visual_textbox_active": False},
+    )
+    actions_seen = []
+    for _ in range(6):
+        actions, nav = player.choose_overworld_actions(state)
+        action = actions[0]
+        actions_seen.append(action)
+        player.record_action_outcome(action, True, "visual_state_changed_after_press_a", "ok", state)
+
+    assert actions_seen == ["press_b", "press_b", "press_up", "press_left", "press_a", "press_a"]
+    assert "press_down" not in actions_seen
+    assert "walk_down" not in actions_seen
+    assert "press_right" not in actions_seen
+    assert "walk_right" not in actions_seen
+
+
+def test_v2_heal_sequence_direction_steps_do_not_open_button_circuit():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        26,
+        2,
+        18,
+        12,
+        party=[{"slot": 1, "species_id": 155, "level": 8, "hp": 5, "max_hp": 24}],
+        bag=[{"item_id": 18, "quantity": 1}],
+        battle={"in_battle": True, "type_id": 2, "enemy_level": 2, "trusted": True, "enemy_hp": 14, "enemy_hp_trusted": True},
+        visual={"screen_class": "overworld_or_battle", "visual_textbox_active": False},
+    )
+
+    player.record_action_outcome("press_b", False, "press_b_no_progress", "ok", state)
+    player.record_action_outcome("press_b", False, "press_b_no_progress", "ok", state)
+    player.record_action_outcome("press_up", False, "direction_press_no_progress", "ok", state)
+    player.record_action_outcome("press_left", False, "direction_press_no_progress", "ok", state)
+
+    assert player.button_failure_count == 0
+    assert player.recovery_level == 0
+    assert player.trainer_missing_menu_fight_index == 4
+
+
+def test_v2_single_pokemon_missing_menu_skips_heal_and_uses_attack_fallback():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        26,
+        2,
+        18,
+        12,
+        party=[{"slot": 1, "species_id": 155, "level": 8, "hp": 5, "max_hp": 24}],
+        bag=[{"item_id": 18, "quantity": 1}],
+        battle={"in_battle": True, "type_id": 2, "enemy_level": 2, "trusted": True, "enemy_hp": 14, "enemy_hp_trusted": True},
+        visual={"screen_class": "overworld_or_battle", "visual_textbox_active": False},
+    )
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert player.trainer_missing_menu_heal_cycles == 0
+    assert actions == ["press_b"]
+    assert nav["battle_policy"] == "trainer_fight_missing_menu_sequence"
+
+
+def test_v2_repeated_battle_fallback_without_hp_change_opens_recovery(tmp_path):
+    player = GoldAutoplayerV2(data_dir=tmp_path)
+    state = make_state(
+        26,
+        2,
+        18,
+        12,
+        party=[{"slot": 1, "species_id": 155, "level": 8, "hp": 5, "max_hp": 24}],
+        battle={"in_battle": True, "type_id": 2, "enemy_level": 2, "trusted": True, "enemy_hp": 14, "enemy_max_hp": 14, "enemy_hp_trusted": True},
+    )
+    nav = {"path_source": "battle_fallback"}
+
+    for _ in range(6):
+        player.record_battle_semantic_progress(state, state, "press_a", nav)
+
+    assert player.recovery_level == 2
+    assert player.verification_reason == "battle_no_semantic_progress"
 
 
 def test_v2_trainer_battle_uses_fight_cursor_when_available():
@@ -1655,6 +1844,43 @@ def test_v2_wild_battle_runs():
 
     assert actions == ["press_b"]
     assert nav["battle_policy"] == "wild_run"
+
+
+def test_v2_wild_battle_grinds_before_falkner_when_no_balls():
+    state = make_state(
+        26,
+        1,
+        7,
+        27,
+        party=[{"slot": 1, "species_id": 155, "level": 9, "hp": 26, "max_hp": 26}],
+        flags={"derived_story_flags": {"has_zephyr_badge": False}},
+        battle={"in_battle": True, "type_id": 1, "wild_species_id": 10, "enemy_level": 3},
+        menu={"active": True, "name": "battle_main", "cursor": "fight", "confidence": "medium"},
+    )
+
+    actions, nav = choose_battle_actions(state)
+
+    assert actions == ["press_a"]
+    assert nav["battle_policy"] == "wild_grind"
+
+
+def test_v2_wild_battle_still_catches_when_balls_available():
+    state = make_state(
+        26,
+        1,
+        7,
+        27,
+        party=[{"slot": 1, "species_id": 155, "level": 9, "hp": 26, "max_hp": 26}],
+        flags={"derived_story_flags": {"has_zephyr_badge": False}},
+        bag=[{"item_id": 2, "quantity": 1}],
+        battle={"in_battle": True, "type_id": 1, "wild_species_id": 16, "enemy_level": 3, "enemy_hp": 4, "enemy_max_hp": 12, "enemy_hp_trusted": True},
+        menu={"active": True, "name": "battle_main", "cursor": "pack", "confidence": "medium"},
+    )
+
+    actions, nav = choose_battle_actions(state)
+
+    assert actions == ["press_a"]
+    assert nav["battle_policy"] == "capture_open_pack"
 
 
 def test_trainer_battle_with_enemy_species_does_not_use_wild_run():
@@ -2310,6 +2536,11 @@ def test_posted_actions_adds_wait_after_button_press():
     assert posted_actions_for("press_down") == ["hold_down_12", "wait_72"]
 
 
+def test_battle_fallback_button_actions_use_longer_settle_wait():
+    assert posted_actions_for_context("press_a", {"path_source": "battle_fallback"}, "BATTLE") == ["press_a", "wait_60"]
+    assert posted_actions_for_context("press_a", {"path_source": "dialogue"}, "OVERWORLD") == ["press_a", "wait_30"]
+
+
 def test_doorway_navigation_uses_short_walk_hold():
     assert walk_hold_frames_for_navigation("walk_left", {"transition": {"kind": "warp"}}) == 24
     assert walk_hold_frames_for_navigation("walk_left", {"path_source": "route31_gate_live_entry", "planned_path_length": 2}) == 24
@@ -2456,6 +2687,29 @@ def test_status_exposes_activation_readiness_gates():
     assert status["readiness"]["safe_to_post_actions"] is False
     assert "dry_run_enabled" in status["readiness"]["blockers"]
     assert "overworld_movement_disabled" in status["readiness"]["blockers"]
+
+
+def test_status_exposes_decision_inspector_payload_and_resource_facts(tmp_path):
+    player = GoldAutoplayerV2(data_dir=tmp_path)
+    state = make_state(
+        26,
+        1,
+        7,
+        27,
+        party=[{"slot": 1, "species_id": 155, "level": 9, "hp": 26, "max_hp": 26}],
+        flags={"derived_story_flags": {"learned_to_catch_pokemon": True, "gave_mystery_egg_to_elm": True}},
+    )
+    state["player"]["money"] = 13
+
+    status = player.build_status({"enabled": True, "engine": "adaptive", "dry_run": False, "allow_overworld_movement": True, "allow_battle_actions": True}, state)
+
+    assert status["intent"]["goal"]["type"] == "route31_grind"
+    assert status["resource_accounting"]["broke_no_balls"] is True
+    assert "lead_level_below_falkner_floor" in status["resource_accounting"]["readiness_blockers"]
+    assert status["policy_candidates"]
+    assert status["decision_trace"][0]["step"] == "observe"
+    memory = json.loads((tmp_path / "pokemon_learning_memory.json").read_text())
+    assert any(fact["category"] == "PKM:RESOURCE" for fact in memory["facts"])
 
 
 def test_verify_press_a_rejects_no_progress():

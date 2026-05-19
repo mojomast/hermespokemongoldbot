@@ -145,6 +145,10 @@ SLOWPOKE_WELL_TARGET = RouteTarget(
     name="Slowpoke Well entrance",
 )
 
+FALKNER_PREP_MAPS = frozenset({(10, 5), (10, 6), (10, 7), (10, 10), (26, 11), (26, 2), (26, 1)})
+FALKNER_MIN_LEVEL = 12
+FALKNER_MIN_HP_RATIO = 0.65
+
 
 def _effective_story_tile(state: dict[str, Any], key: tuple[int, int] | None, tile: tuple[int, int] | None) -> tuple[int, int] | None:
     if key is None or tile is None:
@@ -204,28 +208,32 @@ def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
     lead_level = lead.level if lead is not None else None
     balls = sum(item.quantity for item in snapshot.bag if item.item_id in {0x02, 0x03, 0x04})
     money = snapshot.money or 0
+    has_zephyr = "Zephyr" in snapshot.badges or snapshot.story.has_zephyr_badge
+    falkner_prep_ready = snapshot.story.learned_to_catch_pokemon and snapshot.story.gave_mystery_egg_to_elm
     needs_heal_before_falkner = (
         lead_hp_ratio is not None
-        and lead_hp_ratio < 0.45
-        and not ("Zephyr" in snapshot.badges or snapshot.story.has_zephyr_badge)
-        and key in {(10, 5), (10, 7), (10, 10)}
+        and lead_hp_ratio < FALKNER_MIN_HP_RATIO
+        and not has_zephyr
+        and falkner_prep_ready
+        and key in {(10, 5), (10, 7), (10, 10), (26, 11), (26, 2)}
     )
     if needs_heal_before_falkner:
         return StoryDecision("violet_heal", "Heal before Falkner", VIOLET_POKECENTER_HEAL_TARGET, "lead_hp_low_before_zephyr")
-    falkner_prep_ready = snapshot.story.learned_to_catch_pokemon and snapshot.story.gave_mystery_egg_to_elm
-    needs_balls_before_grind = balls < 3 and money >= 200 and falkner_prep_ready and not ("Zephyr" in snapshot.badges or snapshot.story.has_zephyr_badge)
+    needs_balls_before_grind = balls < 3 and money >= 200 and falkner_prep_ready and not has_zephyr
     if needs_balls_before_grind and key in {(10, 5), (10, 6), (10, 7), (10, 10), (26, 11), (26, 2)}:
         return StoryDecision("violet_buy_balls", "Buy Poke Balls in Violet", VIOLET_MART_BUY_TARGET, "need_balls_before_grind_or_capture")
     needs_grind_before_falkner = (
         lead_level is not None
-        and lead_level < 12
+        and lead_level < FALKNER_MIN_LEVEL
         and falkner_prep_ready
-        and balls > 0
-        and not ("Zephyr" in snapshot.badges or snapshot.story.has_zephyr_badge)
-        and key in {(10, 5), (10, 6), (10, 7), (10, 10), (26, 11), (26, 2)}
+        and not has_zephyr
+        and key in FALKNER_PREP_MAPS
     )
     if needs_grind_before_falkner:
-        return StoryDecision("route31_grind", "Train and catch on Route 31", ROUTE31_GRIND_TARGET, "lead_level_low_before_falkner")
+        reason = "lead_level_low_before_falkner"
+        if balls <= 0 and money < 200:
+            reason = "broke_no_balls_grind_for_exp_before_falkner"
+        return StoryDecision("route31_grind", "Train and catch on Route 31", ROUTE31_GRIND_TARGET, reason)
     if not snapshot.has_starter:
         return StoryDecision("get_starter", "Choose starter in Elm's Lab", STARTER_TARGET, "needs_starter_no_trusted_party")
     needs_elm_return = snapshot.story.event_flags_available and snapshot.story.got_mystery_egg_from_mr_pokemon and not snapshot.story.gave_mystery_egg_to_elm
@@ -260,7 +268,6 @@ def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
         return StoryDecision("violet_gate", "Enter Violet gate", VIOLET_GATE_TARGET, "route31_to_violet_gate")
     if key == (26, 11):
         return StoryDecision("violet_city", "Reach Violet City", VIOLET_CITY_TARGET, "violet_gate_to_violet_city")
-    has_zephyr = "Zephyr" in snapshot.badges or snapshot.story.has_zephyr_badge
     has_hive = "Hive" in snapshot.badges
     if has_zephyr and not has_hive:
         if key in {(10, 5), (10, 7)}:
@@ -278,6 +285,10 @@ def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
         if fallback_targets:
             return StoryDecision("registry_exploration", "Explore reachable map transition", fallback_targets[0], "zephyr_badge_observed_registry_exploration", confidence="fallback")
         return StoryDecision("falkner_complete", "Zephyr badge observed", None, "zephyr_badge_observed_objective_complete")
+    if not has_zephyr and falkner_prep_ready and lead_level is not None and lead_level < FALKNER_MIN_LEVEL and key in FALKNER_PREP_MAPS:
+        return StoryDecision("route31_grind", "Train before Falkner", ROUTE31_GRIND_TARGET, "falkner_not_ready_keep_grinding")
+    if not has_zephyr and falkner_prep_ready and lead_hp_ratio is not None and lead_hp_ratio < FALKNER_MIN_HP_RATIO and key in {(10, 5), (10, 7), (10, 10)}:
+        return StoryDecision("violet_heal", "Heal before Falkner", VIOLET_POKECENTER_HEAL_TARGET, "falkner_ready_but_hp_not_safe")
     if key == (10, 5):
         return StoryDecision("falkner", "Challenge Falkner", FALKNER_TARGET, "violet_city_to_falkner_before_zephyr")
     if key == (10, 7):

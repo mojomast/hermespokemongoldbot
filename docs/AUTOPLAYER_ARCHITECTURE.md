@@ -66,6 +66,9 @@ Gold/Silver handoff rules:
 - A cooldown prevents ping-pong between engines.
 - Handoff details are written to `control.auto_handoff` and
   `gold_autoplayer_supervisor_status.json:last_handoff`.
+- Handoff details are also mirrored into `pokemon_learning_memory.json` as
+  `PKM:POLICY` facts, with hard-stuck rescues also recorded as `PKM:FAILURE`, so
+  later runs and dashboards can explain mode switches without scraping logs.
 
 Hard stuck signals include V2 recovery level, repeated failed verification,
 button failure circuits, and safety-circuit path sources. V1 stuck signals come
@@ -94,6 +97,13 @@ Gold service this is `/home/mojo/.pokemon-agent-gold`.
 | `gold_autoplayer.jsonl` | V1 | Legacy event/action log |
 | `gold_autoplayer_v2.jsonl` | V2/adaptive | V2 turn/status event log |
 | `pokemon_autoplayer.jsonl` | unified | Unified profile turn/status event log |
+
+Shared memory categories currently include `PKM:OBJECTIVE`, `PKM:PROGRESS`,
+`PKM:MAP`, `PKM:STUCK`, `PKM:TEAM`, `PKM:STRATEGY`, `PKM:POLICY`,
+`PKM:RESOURCE`, `PKM:FAILURE`, and `PKM:OUTCOME`. Resource/readiness facts are
+recorded when the bot discovers it is not ready for a goal, for example no balls,
+low money, low HP, or a level floor before Falkner. Outcome/failure facts record
+verified rewards, unverified actions, and control/readiness blockers.
 
 ## Teacher Learning
 
@@ -152,3 +162,12 @@ Key status fields:
 - `v2_readiness.blockers`: why V2/adaptive is not ready for live actions.
 - `status.learning.v1_teacher_import`: V1 teacher import counts.
 - `status.navigation.path_source`: planner/recovery source for the latest action.
+- `mode_switch`: normalized selected/active engine and last handoff reason.
+- `status.intent`: current phase, goal, selected policy, and expected outcome.
+- `status.resource_accounting`: money, balls, healing items, party state, and
+  readiness blockers.
+- `status.policy_candidates`: selected and rejected policy candidates with
+  evidence/blockers.
+- `status.decision_trace`: observe -> assess -> choose -> plan -> learn trace for
+  the dashboard inspector.
+- `status.failure_memory`: recent failures plus shared learning category counts.

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hermes Plays Pokémon</title>
-    <link rel="stylesheet" href="style.css?v=20">
+    <link rel="stylesheet" href="style.css?v=21">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>">
 </head>
 <body>
@@ -144,6 +144,21 @@
                     <div class="game-screen-overlay" id="screenOverlay">
                         <span class="overlay-text">Waiting for game...</span>
                     </div>
+                </div>
+            </div>
+
+            <div class="ai-decision-panel dashboard-section" data-section-id="ai-decision" data-section-title="AI Decision Inspector">
+                <div class="decision-header">
+                    <span class="decision-title">AI Decision Inspector</span>
+                    <span class="decision-updated" id="decisionUpdated">waiting for bot status</span>
+                </div>
+                <div class="decision-grid">
+                    <section class="decision-card" id="decisionMode">Mode switch logic loading...</section>
+                    <section class="decision-card" id="decisionIntent">Intent loading...</section>
+                    <section class="decision-card" id="decisionReadiness">Readiness loading...</section>
+                    <section class="decision-card" id="decisionPolicies">Policy candidates loading...</section>
+                    <section class="decision-card" id="decisionMemory">Learning memory loading...</section>
+                    <section class="decision-card decision-wide" id="decisionTrace">Decision trace loading...</section>
                 </div>
             </div>
 

@@ -21,7 +21,7 @@
     const WS_RECONNECT_MAX = 30000;
     const RTC_ENABLED = true;
     const DASHBOARD_LAYOUT_KEY = 'pokemon_dashboard_layout_v1';
-    const DEFAULT_SECTION_ORDER = ['screen', 'controls', 'stats', 'inventory', 'team', 'battle'];
+    const DEFAULT_SECTION_ORDER = ['screen', 'ai-decision', 'controls', 'stats', 'inventory', 'team', 'battle'];
     const DEFAULT_LEFT_SECTION_ORDER = ['thought-log', 'autoplayer', 'runs-saves', 'game-switch'];
 
     // --- State ---
@@ -81,6 +81,13 @@
     const botReadiness = $('botReadiness');
     const botDiagnostics = $('botDiagnostics');
     const botMemory = $('botMemory');
+    const decisionUpdated = $('decisionUpdated');
+    const decisionMode = $('decisionMode');
+    const decisionIntent = $('decisionIntent');
+    const decisionReadiness = $('decisionReadiness');
+    const decisionPolicies = $('decisionPolicies');
+    const decisionMemory = $('decisionMemory');
+    const decisionTrace = $('decisionTrace');
     const saveName = $('saveName');
     const saveList = $('saveList');
     const btnSaveState = $('btnSaveState');
@@ -225,6 +232,27 @@
     function truncate(s, max) {
         if (typeof s !== 'string') s = JSON.stringify(s);
         return s.length > max ? s.substring(0, max) + '...' : s;
+    }
+
+    function escapeHTML(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function chip(text, kind) {
+        return '<span class="decision-chip ' + escapeHTML(kind || '') + '">' + escapeHTML(text) + '</span>';
+    }
+
+    function compactValue(value, fallback) {
+        if (value === true) return 'yes';
+        if (value === false) return 'no';
+        if (value == null || value === '') return fallback || '---';
+        if (typeof value === 'number') return String(value);
+        return String(value);
     }
 
     // --- Game Screen ---
@@ -781,12 +809,110 @@
         renderReadiness(payload);
         renderBotDiagnostics(status);
         renderBotMemory(payload.memory || status.memory);
+        renderDecisionInspector(payload);
         if (status.turn != null && status.turn !== lastBotTurn) {
             lastBotTurn = status.turn;
             addLog('thinking', 'Bot: ' + (status.objective || control.objective || 'playing') + ' · phase=' + (status.phase || '?') + ' · macro=' + (status.macro || '?'));
             if (status.actions && status.actions.length) {
                 addLog('action', 'Bot action: ' + status.actions.join(', ') + ' · reward=' + (status.reward != null ? status.reward : '?'));
             }
+        }
+    }
+
+    function renderDecisionInspector(payload) {
+        payload = payload || {};
+        var status = payload.status || {};
+        var control = payload.control || {};
+        var modeSwitch = payload.mode_switch || {};
+        var supervisor = payload.supervisor || {};
+        var intent = status.intent || {};
+        var resources = status.resource_accounting || (status.gameplay || {}).resources || {};
+        var readiness = status.readiness || {};
+        var v2Readiness = payload.v2_readiness || {};
+        var policyCandidates = status.policy_candidates || [];
+        var failureMemory = status.failure_memory || {};
+        var learning = status.learning || {};
+        var decisionTrace = status.decision_trace || [];
+        var nav = status.navigation || {};
+        if (decisionUpdated) decisionUpdated.textContent = 'turn ' + compactValue(status.turn) + ' · ' + timeNow();
+
+        if (decisionMode) {
+            var handoff = modeSwitch.last_handoff || supervisor.last_handoff || {};
+            var handoffText = handoff && handoff.reason
+                ? chip((handoff.from || '?') + ' → ' + (handoff.to || '?'), 'selected') + ' because ' + escapeHTML(handoff.reason)
+                : '<span class="decision-muted">No recent handoff</span>';
+            decisionMode.innerHTML = '<strong>Mode Switches</strong><br>'
+                + 'Selected ' + chip(control.engine || status.engine || '---', '')
+                + ' Active ' + chip(supervisor.active_engine || modeSwitch.active_engine || '---', 'selected')
+                + '<br>Fallback: ' + escapeHTML((status.mode_policy || {}).fallback_active ? 'active' : 'idle')
+                + ' · return ' + escapeHTML((status.mode_policy || {}).return_policy || '---')
+                + '<br>Why: ' + escapeHTML((status.mode_policy || {}).switch_reason || 'normal planner path')
+                + '<br>Last handoff: ' + handoffText;
+        }
+
+        if (decisionIntent) {
+            var goal = intent.goal || status.current_goal || {};
+            var actions = status.actions || [];
+            decisionIntent.innerHTML = '<strong>Intent</strong><br>'
+                + chip(intent.phase || status.phase || 'unknown', 'selected')
+                + ' ' + escapeHTML(goal.name || goal.type || status.current_task || 'waiting')
+                + '<br>Because: ' + escapeHTML(truncate(goal.reason || 'no reason yet', 120))
+                + '<br>Policy: ' + chip(intent.selected_policy || nav.battle_policy || nav.path_source || '---', '')
+                + '<br>Next: ' + escapeHTML((actions && actions.length ? actions.join(', ') : nav.next_step || '---'))
+                + '<br>Expected: ' + escapeHTML(truncate(intent.expected_outcome || 'make verified progress', 120));
+        }
+
+        if (decisionReadiness) {
+            var blockers = [];
+            (readiness.blockers || []).forEach(function (item) { blockers.push(item); });
+            (v2Readiness.blockers || []).forEach(function (item) { if (blockers.indexOf(item) === -1) blockers.push(item); });
+            (resources.readiness_blockers || []).forEach(function (item) { if (blockers.indexOf(item) === -1) blockers.push(item); });
+            decisionReadiness.innerHTML = '<strong>Resources & Gates</strong><br>'
+                + 'Money $' + escapeHTML(compactValue(resources.money))
+                + ' · balls ' + escapeHTML(compactValue(resources.balls))
+                + ' · heals ' + escapeHTML(compactValue(resources.healing_items))
+                + '<br>Lead L' + escapeHTML(compactValue(resources.lead_level))
+                + ' · HP ' + escapeHTML(resources.lead_hp_ratio != null ? Math.round(resources.lead_hp_ratio * 100) + '%' : '---')
+                + ' · party ' + escapeHTML(compactValue(resources.party_count))
+                + '<br>Falkner ready: ' + chip(resources.falkner_ready ? 'yes' : 'no', resources.falkner_ready ? 'selected' : 'blocker')
+                + '<br>' + (blockers.length ? blockers.map(function (b) { return chip(b, 'blocker'); }).join('') : chip('no blockers', 'selected'));
+        }
+
+        if (decisionPolicies) {
+            var rows = policyCandidates.slice(0, 4).map(function (candidate) {
+                var kind = candidate.selected ? 'selected' : '';
+                var blockers = candidate.blockers && candidate.blockers.length ? ' blockers: ' + candidate.blockers.join(', ') : '';
+                return '<div class="decision-policy ' + (candidate.selected ? 'is-selected' : '') + '">'
+                    + chip(candidate.selected ? 'selected' : (candidate.kind || 'candidate'), kind)
+                    + ' <strong>' + escapeHTML(candidate.name || 'policy') + '</strong>'
+                    + ' score ' + escapeHTML(compactValue(candidate.score))
+                    + '<br><span>' + escapeHTML(truncate(candidate.expected_outcome || '', 120)) + '</span>'
+                    + (blockers ? '<br><span class="decision-danger">' + escapeHTML(blockers) + '</span>' : '')
+                    + '</div>';
+            });
+            decisionPolicies.innerHTML = '<strong>Policy Candidates</strong><br>' + (rows.length ? rows.join('') : '<span class="decision-muted">No candidates yet</span>');
+        }
+
+        if (decisionMemory) {
+            var counts = failureMemory.shared_counts || learning.shared_counts || (payload.shared_learning || {}).counts || {};
+            var last = learning.last_transition || ((decisionTrace[4] || {}).evidence || {}).last_transition || {};
+            var facts = failureMemory.recent_facts || (payload.shared_learning || {}).recent_facts || [];
+            var countText = Object.keys(counts).sort().map(function (key) { return key.replace('PKM:', '') + ':' + counts[key]; }).join(' · ');
+            decisionMemory.innerHTML = '<strong>Learning Memory</strong><br>'
+                + escapeHTML(countText || 'No shared facts yet')
+                + '<br>Last outcome: ' + escapeHTML(last.action || '---')
+                + ' reward ' + escapeHTML(compactValue(last.reward))
+                + ' · ' + escapeHTML(last.reason || '---')
+                + '<br>Recent fact: ' + escapeHTML(truncate((facts[0] || {}).text || 'none', 120));
+        }
+
+        if (decisionTrace) {
+            var traceRows = decisionTrace.slice(0, 5).map(function (step, index) {
+                return '<div class="decision-trace-step"><span>' + (index + 1) + '. ' + escapeHTML(step.step || 'step') + '</span>'
+                    + '<code>' + escapeHTML(truncate(JSON.stringify(step.evidence || {}), 220)) + '</code></div>';
+            });
+            decisionTrace.innerHTML = '<strong>Observe → Assess → Choose → Act → Learn</strong>'
+                + (traceRows.length ? traceRows.join('') : '<br><span class="decision-muted">Trace waiting for V2/adaptive status</span>');
         }
     }
 

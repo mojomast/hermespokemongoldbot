@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from pokemon_agent.autoplayer.learning import LearningFact, LearningMemory
+
 
 VALID_ENGINES = {"v1", "v2", "unified", "adaptive"}
 GOLD_ENGINES = {"v1", "v2", "adaptive"}
@@ -65,6 +67,10 @@ class AutoplayerSupervisor:
     def supervisor_status_path(self) -> Path:
         return self.data_dir / "gold_autoplayer_supervisor_status.json"
 
+    @property
+    def shared_memory_path(self) -> Path:
+        return self.data_dir / "pokemon_learning_memory.json"
+
     def read_engine(self) -> str:
         return self.engine_for_control(self.read_control())
 
@@ -106,18 +112,23 @@ class AutoplayerSupervisor:
             return engine, None
         now = time.time()
         handoff_state = control.get("auto_handoff") if isinstance(control.get("auto_handoff"), dict) else {}
-        cooldown_until = handoff_state.get("cooldown_until")
-        if isinstance(cooldown_until, (int, float)) and now < cooldown_until:
-            return engine, None
         profile = status.get("profile") or ((status.get("runner") or {}).get("profile") if isinstance(status.get("runner"), dict) else None)
         if profile and profile not in {"gold_silver", "gold", "silver"}:
             return engine, None
         navigation = status.get("navigation") if isinstance(status.get("navigation"), dict) else {}
+        actions = status.get("actions") if isinstance(status.get("actions"), list) else []
+        battle_blocked = (
+            status.get("phase") == "BATTLE"
+            and not actions
+            and isinstance(navigation.get("battle_policy"), str)
+            and "blocked_missing_menu_state" in navigation.get("battle_policy")
+        )
         hard_stuck = (
             navigation.get("path_source") in {"safety_circuit_breaker", "safety_button_circuit_breaker"}
             or int(navigation.get("recovery_level", 0) or 0) >= 2
             or int(navigation.get("stuck_counter", 0) or 0) >= 3
             or int(navigation.get("button_failures", 0) or 0) >= 3
+            or battle_blocked
         )
         v1_stuck = bool(status.get("stuck") or status.get("position_stuck") or status.get("coord_oscillating"))
         if engine in {"v2", "adaptive", "unified"} and hard_stuck:
@@ -131,6 +142,14 @@ class AutoplayerSupervisor:
         if target not in VALID_ENGINES or target == engine:
             return engine, None
         if engine == "unified" and profile and profile != "gold_silver":
+            return engine, None
+        cooldown_until = handoff_state.get("cooldown_until")
+        if (
+            isinstance(cooldown_until, (int, float))
+            and now < cooldown_until
+            and handoff_state.get("from") == engine
+            and handoff_state.get("to") == target
+        ):
             return engine, None
         return target, {
             "from": engine,
@@ -216,6 +235,29 @@ class AutoplayerSupervisor:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(self.supervisor_status_path)
 
+    def record_handoff_learning(self, handoff: dict[str, Any]) -> None:
+        try:
+            memory = LearningMemory(self.shared_memory_path)
+            memory.add_fact(LearningFact(
+                category="PKM:POLICY",
+                game_id="gold_silver",
+                text=f"Auto handoff {handoff.get('from')} -> {handoff.get('to')} because {handoff.get('reason')}",
+                confidence="observed",
+                source="gold_autoplayer_service",
+                data={"kind": "mode_handoff", **handoff, "evidence_count": 1},
+            ))
+            if str(handoff.get("reason") or "").endswith("hard_stuck") or handoff.get("reason") == "v1_stuck":
+                memory.add_fact(LearningFact(
+                    category="PKM:FAILURE",
+                    game_id="gold_silver",
+                    text=f"Mode {handoff.get('from')} needed rescue handoff at {handoff.get('path_source') or 'unknown context'}",
+                    confidence="observed",
+                    source="gold_autoplayer_service",
+                    data={"kind": "mode_handoff_failure", **handoff, "evidence_count": 1},
+                ))
+        except Exception:
+            return
+
     def stop_child(self, timeout: float = 5.0) -> None:
         child = self.child
         if child is None:
@@ -243,6 +285,7 @@ class AutoplayerSupervisor:
             control["auto_handoff"] = handoff
             self.write_control(control)
             self.last_handoff = handoff
+            self.record_handoff_learning(handoff)
             engine = handoff_engine
         if self.child is not None and self.child.poll() is not None:
             self.last_exit_code = self.child.poll()

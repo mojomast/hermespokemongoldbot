@@ -1751,7 +1751,7 @@ class GoalDirectedGoldPlayer:
         return "storage_floor_to_exit_down", ["walk_down", "wait_30"]
 
     def _mart_macro(self, obs: Observation) -> tuple[str, list[str]] | None:
-        if obs.map_group_number != (26, 4):
+        if obs.map_group_number not in {(26, 4), (10, 6)}:
             return None
         actual = self.actual_xy(obs)
         balls = obs.bag_item_count(2, 3, 4)
@@ -2085,18 +2085,22 @@ class GoalDirectedGoldPlayer:
         ball_count = obs.bag_item_count(2, 3, 4)
         potion_count = obs.bag_item_count(18)
         party_count = len(obs.state.get("party") or [])
+        battle_type = int(battle.get("type_id") or 0)
+        is_wild = battle_type == 1
         # If the lead is hurt, prioritize escaping wild battles so the overworld
         # healing route can take over instead of fainting during grinding.
-        if obs.lead_hp_ratio is not None and obs.lead_hp_ratio <= 0.25 and self.repeated_position_count >= 8:
+        if is_wild and obs.lead_hp_ratio is not None and obs.lead_hp_ratio <= 0.25 and self.repeated_position_count >= 8:
             return "battle_run_after_potion_stall", ["hold_down_20", "wait_20", "hold_right_20", "wait_20", "press_a", "wait_80", "press_b", "wait_30"]
         if obs.lead_hp_ratio is not None and obs.lead_hp_ratio <= 0.25 and potion_count > 0:
             return "battle_use_potion_low_hp", ["walk_right", "wait_20", "press_a", "wait_40", "press_a", "wait_40", "press_a", "wait_120"]
-        if obs.needs_healing and (not self.visual_textbox_active(obs) or self.repeated_hash_count >= 3 or self.repeated_position_count >= 5):
+        if is_wild and obs.needs_healing and (not self.visual_textbox_active(obs) or self.repeated_hash_count >= 3 or self.repeated_position_count >= 5):
             return "battle_run_low_hp", ["hold_down_20", "wait_20", "hold_right_20", "wait_20", "press_a", "wait_80"]
-        if int(battle.get("type_id") or 0) == 1 and ball_count > 0 and party_count < 3 and self.repeated_position_count >= 4:
+        if is_wild and ball_count > 0 and party_count < 3 and self.repeated_position_count >= 4:
             return "battle_throw_ball", ["walk_right", "wait_20", "press_a", "wait_40", "press_a", "wait_120"]
-        if self.repeated_position_count >= 20 and int(battle.get("type_id") or 0) == 1:
+        if self.repeated_position_count >= 20 and is_wild:
             return "battle_run_stuck_wild", ["press_b", "wait_30", "hold_down_20", "wait_20", "hold_right_20", "wait_20", "press_a", "wait_80"]
+        if self.repeated_position_count >= 8 and battle_type == 2 and party_count <= 1:
+            return "battle_attack_single_party_stuck_menu", ["press_b", "wait_30", "press_b", "wait_30", "hold_up_20", "wait_20", "hold_left_20", "wait_20", "press_a", "wait_60", "press_a", "wait_100", "hold_b_40", "wait_20"]
         if self.repeated_position_count >= 8:
             move_attempt = (self.repeated_position_count - 8) // 8 % 4
             move_select: list[str]

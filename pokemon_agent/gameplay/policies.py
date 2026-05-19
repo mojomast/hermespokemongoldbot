@@ -71,6 +71,14 @@ def choose_catch_action(state: GameSnapshot, owned_species: set[str] | None = No
                 return CatchDecision("throw_ball", "target HP is reduced", battle.enemy_species)
             return CatchDecision("weaken", "target HP is high", battle.enemy_species)
         return CatchDecision("throw_ball", "species is useful for progression", battle.enemy_species)
+    if battle.enemy_has_status or any(move in DANGEROUS_ENEMY_MOVE_IDS for move in battle.enemy_moves):
+        return CatchDecision("throw_ball", "early roster target is safer to catch than weaken", battle.enemy_species)
+    if len(state.party) < 3:
+        if battle.enemy_hp_ratio is not None:
+            if battle.enemy_hp_ratio <= 0.5:
+                return CatchDecision("throw_ball", "early roster slot open and target HP is reduced", battle.enemy_species)
+            return CatchDecision("weaken", "early roster slot open; weaken new species before catching", battle.enemy_species)
+        return CatchDecision("throw_ball", "early roster slot open for new species", battle.enemy_species)
     return CatchDecision("run", "species is not a current catch target", battle.enemy_species)
 
 

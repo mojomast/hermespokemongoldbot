@@ -775,6 +775,26 @@ def _read_json_file(path: Path, default):
         return default
 
 
+def _shared_learning_summary(limit: int = 10) -> dict:
+    payload = _read_json_file(_autoplayer_unified_learning_path(), {})
+    facts = payload.get("facts") if isinstance(payload, dict) else []
+    if not isinstance(facts, list):
+        facts = []
+    rows = [row for row in facts if isinstance(row, dict)]
+    counts: dict[str, int] = {}
+    for row in rows:
+        category = str(row.get("category") or "PKM:PROGRESS")
+        counts[category] = counts.get(category, 0) + 1
+    rows.sort(key=lambda row: float(row.get("updated_at") or 0.0), reverse=True)
+    return {
+        "path": str(_autoplayer_unified_learning_path()),
+        "facts": len(rows),
+        "counts": counts,
+        "recent_facts": rows[:limit],
+        "updated_at": payload.get("updated_at") if isinstance(payload, dict) else None,
+    }
+
+
 def _tail_jsonl(path: Path, limit: int = 25) -> list[dict]:
     rows: deque[dict] = deque(maxlen=limit)
     try:
@@ -1658,6 +1678,14 @@ def _build_autoplayer_status_payload() -> dict:
         if supervisor.get("last_handoff"):
             handoff = supervisor.get("last_handoff") if isinstance(supervisor.get("last_handoff"), dict) else {}
             warnings.append(f"Auto handoff {handoff.get('from')} -> {handoff.get('to')}: {handoff.get('reason')}")
+    shared_learning = _shared_learning_summary()
+    mode_switch = {
+        "selected_engine": control.get("engine"),
+        "active_engine": supervisor.get("active_engine") if isinstance(supervisor, dict) else None,
+        "desired_engine": supervisor.get("desired_engine") if isinstance(supervisor, dict) else None,
+        "last_handoff": supervisor.get("last_handoff") if isinstance(supervisor, dict) else None,
+        "warnings": warnings,
+    }
     memory = status.get("memory")
     if not memory:
         world = _read_json_file(_autoplayer_world_path(), {})
@@ -1682,6 +1710,8 @@ def _build_autoplayer_status_payload() -> dict:
         },
         "supervisor": supervisor,
         "supervisor_health": supervisor_health,
+        "mode_switch": mode_switch,
+        "shared_learning": shared_learning,
         "v2_readiness": v2_readiness,
         "warnings": warnings,
         "memory": memory,

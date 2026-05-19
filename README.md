@@ -19,7 +19,8 @@ This repository is focused on the Gold bot work published at
 - Read-only public watch page with live viewer count, chat, bot telemetry, and a
   Game Boy Color-styled broadcast UI.
 - Full local control dashboard for manual controls, bot guidance, saves, runs,
-  inventory, team, battle state, and diagnostics.
+  inventory, team, battle state, diagnostics, and an AI Decision Inspector directly
+  below the video output.
 - Hermes Games tab metadata for opening upload, watch, and control pages either
   embedded or in separate browser tabs.
 - Pokemon Gold RAM reader for structured state such as map, position, party,
@@ -168,6 +169,9 @@ Safety gates are explicit in the dashboard and API:
 
 Use `/autoplayer/status` to compare the selected engine, supervisor active
 engine, readiness blockers, V2 pathfinding diagnostics, and learning telemetry.
+The control dashboard renders the same status as a decision inspector under the
+video: mode switches and handoff reasons, current intent, selected policy,
+resource/readiness blockers, policy candidates, and recent learning/failure facts.
 
 Runtime control and status files are stored under the configured data directory,
 typically `/home/mojo/.pokemon-agent-gold/`:
@@ -197,6 +201,9 @@ Current learning techniques are intentionally pragmatic and transparent:
 - Unified mode persists categorized `PKM:` facts in `pokemon_learning_memory.json`.
 - V2/adaptive also writes verified progress and stuck facts into
   `pokemon_learning_memory.json` so other modes can reuse the same evidence.
+- V2/adaptive and the supervisor also write policy, resource, failure, and outcome
+  facts such as mode handoffs, no-balls/no-money readiness gates, Falkner prep
+  blockers, action rewards, and control/readiness failures.
 - V1 teacher evidence is imported into `pokemon_learning_memory.json` with
   `source: "v1_teacher"`; V2/adaptive only use those facts in fallback contexts,
   not as an unchecked override of healthy route planning.
@@ -204,6 +211,9 @@ Current learning techniques are intentionally pragmatic and transparent:
   scoped by their own `game_id`.
 - Learned values are used for diagnostics and future tie-breaking; they do not
   override V2's verified planner unless explicitly implemented and tested.
+- Live state always overrides stale memory. Learned resource and failure facts are
+  reused as explanations, readiness gates, and fallback/tie-breaker evidence, not
+  as blind walkthrough commands.
 
 Do not use save-state search, future hidden information, hidden RNG reads, or ROM
 data not surfaced through the server state/vision APIs to pick actions. User
