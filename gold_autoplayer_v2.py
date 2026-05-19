@@ -801,6 +801,7 @@ class GoldAutoplayerV2:
         self.mart_buy_sequence_index = 0
         self.grind_sequence_index = 0
         self.loop_sleep_seconds = DEFAULT_LOOP_SLEEP_SECONDS
+        self.learning = self.load_learning()
 
     @property
     def control_path(self) -> Path:
@@ -813,6 +814,137 @@ class GoldAutoplayerV2:
     @property
     def event_log_path(self) -> Path:
         return self.data_dir / "gold_autoplayer_v2.jsonl"
+
+    @property
+    def learning_path(self) -> Path:
+        return self.data_dir / "gold_autoplayer_v2_learning.json"
+
+    def load_learning(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.learning_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("schema_version", 1)
+        payload.setdefault("engine", "v2")
+        payload.setdefault("action_values", {})
+        payload.setdefault("blocked_edges", {})
+        payload.setdefault("tile_visits", {})
+        payload.setdefault("planner_imitation", {})
+        payload.setdefault("turns", 0)
+        payload.setdefault("updated_at", 0.0)
+        return payload
+
+    def persist_learning(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.learning["turns"] = self.turn
+        self.learning["updated_at"] = time.time()
+        tmp = self.learning_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.learning, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(self.learning_path)
+
+    def learning_summary(self) -> dict[str, Any]:
+        action_values = self.learning.get("action_values") if isinstance(self.learning, dict) else {}
+        blocked_edges = self.learning.get("blocked_edges") if isinstance(self.learning, dict) else {}
+        tile_visits = self.learning.get("tile_visits") if isinstance(self.learning, dict) else {}
+        return {
+            "path": str(self.learning_path),
+            "state_action_keys": len(action_values) if isinstance(action_values, dict) else 0,
+            "blocked_edges_learned": len(blocked_edges) if isinstance(blocked_edges, dict) else 0,
+            "tiles_visited": len(tile_visits) if isinstance(tile_visits, dict) else 0,
+            "turns": self.learning.get("turns", 0) if isinstance(self.learning, dict) else 0,
+        }
+
+    def state_key_for_learning(self, state: dict[str, Any] | None) -> str:
+        if not state:
+            return "state:unavailable"
+        try:
+            snapshot = snapshot_from_state(state)
+            story = explain_story_objective(state)
+            battle = "battle" if snapshot.battle.in_battle else "overworld"
+            return f"{snapshot.position.map_group}:{snapshot.position.map_number}:{snapshot.position.x}:{snapshot.position.y}:{battle}:{story.objective_key}"
+        except Exception:
+            return "state:untrusted"
+
+    def reward_for_transition(
+        self,
+        before_state: dict[str, Any] | None,
+        after_state: dict[str, Any] | None,
+        action: str,
+        verified: bool,
+        reason: str,
+        post_result: str,
+    ) -> float:
+        reward = 0.0
+        if post_result == "ok":
+            reward += 0.05
+        if verified:
+            reward += 0.25
+        if action.startswith("walk_") and not verified and post_result == "ok":
+            reward -= 0.5
+        if reason == "position_did_not_advance":
+            reward -= 0.75
+        if after_state is None or before_state is None:
+            return reward
+        try:
+            before = snapshot_from_state(before_state)
+            after = snapshot_from_state(after_state)
+        except Exception:
+            return reward
+        if before.position.map_key != after.position.map_key:
+            reward += 1.5
+        elif before.position.tile != after.position.tile:
+            reward += 0.6
+        tile_key = f"{after.position.map_group}:{after.position.map_number}:{after.position.x}:{after.position.y}"
+        visits = int((self.learning.get("tile_visits") or {}).get(tile_key, 0))
+        reward += 0.2 / ((visits + 1) ** 0.5)
+        if len(after.party) > len(before.party):
+            reward += 5.0
+        before_badges = int((before_state.get("player") or {}).get("badges", 0) or 0)
+        after_badges = int((after_state.get("player") or {}).get("badges", 0) or 0)
+        if after_badges > before_badges:
+            reward += 20.0
+        return round(reward, 4)
+
+    def record_learning_transition(
+        self,
+        action: str,
+        verified: bool,
+        reason: str,
+        post_result: str,
+        before_state: dict[str, Any] | None,
+        after_state: dict[str, Any] | None,
+    ) -> float:
+        reward = self.reward_for_transition(before_state, after_state, action, verified, reason, post_result)
+        state_key = self.state_key_for_learning(before_state)
+        action_values = self.learning.setdefault("action_values", {})
+        state_values = action_values.setdefault(state_key, {})
+        stats = state_values.setdefault(action, {"count": 0, "reward_total": 0.0, "mean_reward": 0.0, "last_reason": ""})
+        stats["count"] = int(stats.get("count", 0)) + 1
+        stats["reward_total"] = round(float(stats.get("reward_total", 0.0)) + reward, 4)
+        stats["mean_reward"] = round(stats["reward_total"] / max(1, stats["count"]), 4)
+        stats["last_reason"] = reason
+        stats["last_verified"] = verified
+        stats["updated_at"] = time.time()
+        if after_state is not None:
+            try:
+                after = snapshot_from_state(after_state)
+                tile_key = f"{after.position.map_group}:{after.position.map_number}:{after.position.x}:{after.position.y}"
+                visits = self.learning.setdefault("tile_visits", {})
+                visits[tile_key] = int(visits.get(tile_key, 0)) + 1
+            except Exception:
+                pass
+        self.learning["last_transition"] = {
+            "state_key": state_key,
+            "action": action,
+            "reward": reward,
+            "verified": verified,
+            "reason": reason,
+            "post_result": post_result,
+            "updated_at": time.time(),
+        }
+        return reward
 
     def read_control(self) -> dict[str, Any]:
         defaults: dict[str, Any] = {
@@ -1063,6 +1195,11 @@ class GoldAutoplayerV2:
         if key is None or tile is None:
             return
         self.blocked_edges_by_map.setdefault(key, set()).add((tile, direction))
+        edge_key = f"{key[0]}:{key[1]}:{tile[0]}:{tile[1]}:{direction}"
+        blocked = self.learning.setdefault("blocked_edges", {})
+        stats = blocked.setdefault(edge_key, {"count": 0, "map_group": key[0], "map_number": key[1], "x": tile[0], "y": tile[1], "direction": direction})
+        stats["count"] = int(stats.get("count", 0)) + 1
+        stats["updated_at"] = time.time()
 
     def blocked_edges_for_planner(self) -> dict[tuple[int, int], frozenset[tuple[tuple[int, int], str]]]:
         return {key: frozenset(edges) for key, edges in self.blocked_edges_by_map.items()}
@@ -1450,7 +1587,8 @@ class GoldAutoplayerV2:
             state_error = "state unavailable"
         ram_health = (gameplay.get("ram_health") if isinstance(gameplay, dict) else {}) or {}
         readiness_blockers: list[str] = []
-        if control.get("engine") != "v2":
+        engine_selected = control.get("engine") in {"v2", "unified"}
+        if not engine_selected:
             readiness_blockers.append("engine_not_selected")
         if not enabled:
             readiness_blockers.append("disabled")
@@ -1466,7 +1604,7 @@ class GoldAutoplayerV2:
             readiness_blockers.append("overworld_movement_disabled")
         if actions and phase == "BATTLE" and not allow_battle:
             readiness_blockers.append("battle_actions_disabled")
-        safe_to_post_actions = enabled and control.get("engine") == "v2" and state_error is None and not dry_run and not readiness_blockers
+        safe_to_post_actions = enabled and engine_selected and state_error is None and not dry_run and not readiness_blockers
         return {
             "schema_version": 2,
             "engine": "v2",
@@ -1483,8 +1621,10 @@ class GoldAutoplayerV2:
             "actions": actions,
             "runner": {
                 "engine": "v2",
-                "mode": "active" if control.get("engine") == "v2" and enabled else "paused",
+                "mode": "active" if engine_selected and enabled else "paused",
+                "selected_engine": control.get("engine"),
                 "event_log": str(self.event_log_path),
+                "learning_file": str(self.learning_path),
                 "last_error": self.last_api_error or state_error,
                 "dry_run": dry_run,
                 "allow_overworld_movement": allow_overworld,
@@ -1494,7 +1634,7 @@ class GoldAutoplayerV2:
                 "next_api_retry_at": self.next_api_retry_at,
             },
             "readiness": {
-                "engine_selected": control.get("engine") == "v2",
+                "engine_selected": engine_selected,
                 "enabled": enabled,
                 "state_available": state_error is None,
                 "dry_run": dry_run,
@@ -1505,12 +1645,13 @@ class GoldAutoplayerV2:
                 "safe_to_post_actions": safe_to_post_actions,
                 "blockers": readiness_blockers,
             },
+            "learning": self.learning_summary(),
             "updated_at": time.time(),
         }
 
     def run_once(self) -> dict[str, Any]:
         control = self.read_control()
-        if control.get("engine") != "v2":
+        if control.get("engine") not in {"v2", "unified"}:
             status = self.build_status({**control, "enabled": False}, None)
             status["selected_engine"] = control.get("engine")
             status["message"] = "V2 idle while another bot engine is selected."
@@ -1562,6 +1703,11 @@ class GoldAutoplayerV2:
                         after_state = self.request_json("/state")
                         verified, reason = verify_single_action(state, after_state, action)
                         self.record_action_outcome(action, verified, reason, "ok", state)
+                        reward = self.record_learning_transition(action, verified, reason, "ok", state, after_state)
+                        status["learning"] = self.learning_summary() | {"last_reward": reward}
+                if self.last_step_result in {"dry_run", "blocked_by_control", "blocked_invalid_action", "post_failed"}:
+                    reward = self.record_learning_transition(action, False, self.verification_reason or "not_posted", self.last_step_result or "blocked", state, None)
+                    status["learning"] = self.learning_summary() | {"last_reward": reward}
                 status["navigation"]["last_step_result"] = self.last_step_result
                 status["navigation"]["last_step_action"] = self.last_step_action
                 status["navigation"]["last_step_verified"] = self.last_step_verified
@@ -1582,6 +1728,8 @@ class GoldAutoplayerV2:
                 status["navigation"]["verification_reason"] = self.verification_reason
                 status["navigation"].update(self.blocked_edge_status())
         self.write_status(status)
+        if self.turn % 5 == 0:
+            self.persist_learning()
         self.log_event({
             "event": "turn",
             "phase": status.get("phase"),

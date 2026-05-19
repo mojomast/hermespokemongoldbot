@@ -22,7 +22,7 @@
     const RTC_ENABLED = true;
     const DASHBOARD_LAYOUT_KEY = 'pokemon_dashboard_layout_v1';
     const DEFAULT_SECTION_ORDER = ['screen', 'controls', 'stats', 'inventory', 'team', 'battle'];
-    const DEFAULT_LEFT_SECTION_ORDER = ['thought-log', 'autoplayer', 'runs-saves'];
+    const DEFAULT_LEFT_SECTION_ORDER = ['thought-log', 'autoplayer', 'runs-saves', 'game-switch'];
 
     // --- State ---
     let ws = null;
@@ -47,6 +47,8 @@
     const statusDot = $('statusDot');
     const statusText = $('statusText');
     const dashboardViewerCount = $('dashboardViewerCount');
+    const btnUploadRom = $('btnUploadRom');
+    const btnShareLive = $('btnShareLive');
     const logContainer = $('logContainer');
     const gameStream = $('gameStream');
     const gameScreen = $('gameScreen');
@@ -71,7 +73,12 @@
     const botObjective = $('botObjective');
     const botGuidance = $('botGuidance');
     const btnBotGuidance = $('btnBotGuidance');
+    const btnClearGuidance = $('btnClearGuidance');
+    const botDryRun = $('botDryRun');
+    const botAllowOverworld = $('botAllowOverworld');
+    const botAllowBattle = $('botAllowBattle');
     const botStatus = $('botStatus');
+    const botReadiness = $('botReadiness');
     const botDiagnostics = $('botDiagnostics');
     const botMemory = $('botMemory');
     const saveName = $('saveName');
@@ -86,6 +93,15 @@
     const btnLoadRun = $('btnLoadRun');
     const btnNewRun = $('btnNewRun');
     const runStatus = $('runStatus');
+    const romList = $('romList');
+    const btnUseRom = $('btnUseRom');
+    const btnRefreshRoms = $('btnRefreshRoms');
+    const romStatus = $('romStatus');
+    const romLaunchCommand = $('romLaunchCommand');
+    const btnTunnelWatch = $('btnTunnelWatch');
+    const btnTunnelUpload = $('btnTunnelUpload');
+    const tunnelStatus = $('tunnelStatus');
+    const shareLinks = $('shareLinks');
     let botEnabled = true;
     let lastBotTurn = null;
 
@@ -729,6 +745,7 @@
         pollAutoplayer();
         refreshSaves();
         refreshRuns();
+        refreshRoms();
         pollTimer = setInterval(pollState, POLL_INTERVAL);
         screenshotTimer = setInterval(pollScreenshot, SCREENSHOT_INTERVAL);
         setInterval(pollAutoplayer, 2500);
@@ -746,6 +763,9 @@
         if (botBias && control.movement_bias) botBias.value = control.movement_bias;
         if (botObjective && control.objective && document.activeElement !== botObjective) botObjective.value = control.objective;
         if (botGuidance && control.guidance_prompt != null && document.activeElement !== botGuidance) botGuidance.value = control.guidance_prompt;
+        if (botDryRun && document.activeElement !== botDryRun) botDryRun.checked = control.dry_run !== false;
+        if (botAllowOverworld && document.activeElement !== botAllowOverworld) botAllowOverworld.checked = control.allow_overworld_movement === true;
+        if (botAllowBattle && document.activeElement !== botAllowBattle) botAllowBattle.checked = control.allow_battle_actions === true;
         if (botStatus) {
             botStatus.innerHTML = '<strong>' + (botEnabled ? 'Playing' : 'Paused') + '</strong>'
                 + ' · engine ' + engine.toUpperCase()
@@ -758,6 +778,7 @@
                 botStatus.innerHTML += '<br>Guidance: ' + truncate(status.guidance_prompt, 140);
             }
         }
+        renderReadiness(payload);
         renderBotDiagnostics(status);
         renderBotMemory(payload.memory || status.memory);
         if (status.turn != null && status.turn !== lastBotTurn) {
@@ -795,6 +816,38 @@
                 + ' · map ' + (nav.map_spec || '---')
                 + ' · recovery ' + (nav.recovery_level != null ? nav.recovery_level : '---');
         }
+        if (nav.last_step_action || nav.last_step_verified != null || nav.verification_reason) {
+            botDiagnostics.innerHTML += '<br><strong>Verify</strong>: '
+                + (nav.last_step_action || '---')
+                + ' · verified ' + (nav.last_step_verified != null ? nav.last_step_verified : '---')
+                + ' · ' + (nav.verification_reason || '---')
+                + ' · blocked edges ' + (nav.blocked_edges != null ? nav.blocked_edges : '---');
+        }
+        var learning = status.learning || {};
+        if (learning.path || learning.state_action_keys != null) {
+            botDiagnostics.innerHTML += '<br><strong>Learning</strong>: '
+                + (learning.state_action_keys != null ? learning.state_action_keys : 0) + ' state/action keys'
+                + ' · ' + (learning.tiles_visited != null ? learning.tiles_visited : 0) + ' tiles'
+                + (learning.last_reward != null ? ' · reward ' + learning.last_reward : '');
+        }
+    }
+
+    function renderReadiness(payload) {
+        if (!botReadiness) return;
+        payload = payload || {};
+        var supervisor = payload.supervisor || {};
+        var health = payload.supervisor_health || {};
+        var readiness = payload.v2_readiness || {};
+        var blockers = readiness.blockers || [];
+        var warnings = payload.warnings || [];
+        var html = '<strong>Selected</strong>: ' + ((payload.control || {}).engine || '---')
+            + ' · <strong>Active</strong>: ' + (supervisor.active_engine || '---')
+            + ' · <strong>Supervisor</strong>: ' + (health.healthy ? 'healthy' : 'not healthy')
+            + ' · <strong>V2 live</strong>: ' + (readiness.ready_for_live_actions ? 'ready' : 'blocked');
+        if (blockers.length) html += '<br><strong>Blockers</strong>: ' + blockers.join(', ');
+        if (warnings.length) html += '<br><strong>Warnings</strong>: ' + warnings.join(', ');
+        botReadiness.innerHTML = html;
+        botReadiness.style.color = blockers.length || warnings.length ? 'var(--accent-amber)' : 'var(--accent-green)';
     }
 
     function renderBotMemory(memory) {
@@ -867,6 +920,139 @@
         if (!runStatus) return;
         runStatus.textContent = text;
         runStatus.style.color = isError ? 'var(--accent-red)' : 'var(--text-dim)';
+    }
+
+    function setRomStatus(text, isError) {
+        if (!romStatus) return;
+        romStatus.textContent = text;
+        romStatus.style.color = isError ? 'var(--accent-red)' : 'var(--text-dim)';
+    }
+
+    function setTunnelStatus(text, isError) {
+        if (!tunnelStatus) return;
+        tunnelStatus.textContent = text;
+        tunnelStatus.style.color = isError ? 'var(--accent-red)' : 'var(--text-dim)';
+    }
+
+    function renderShareLinks(payload) {
+        if (!shareLinks) return;
+        shareLinks.innerHTML = '';
+        if (!payload || !payload.base_url) return;
+        [
+            ['Read-only live stream', payload.watch_url],
+            ['ROM upload dialog', payload.upload_url]
+        ].forEach(function (item) {
+            if (!item[1]) return;
+            var link = document.createElement('a');
+            link.href = item[1];
+            link.target = '_blank';
+            link.rel = 'noreferrer';
+            link.textContent = item[0] + ': ' + item[1];
+            shareLinks.appendChild(link);
+        });
+    }
+
+    function startTunnel(path, openWhenReady) {
+        setTunnelStatus('Starting public tunnel...', false);
+        return fetch(getBaseURL() + '/tunnel/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: path })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (payload) {
+                renderShareLinks(payload);
+                if (!payload.url) throw new Error('Tunnel started but no public URL was found yet. Try again in a few seconds.');
+                setTunnelStatus('Public link ready: ' + payload.url, false);
+                addLog('key-moment', 'Public link ready: ' + payload.url);
+                try { navigator.clipboard && navigator.clipboard.writeText(payload.url); } catch (_) {}
+                if (openWhenReady) window.open(payload.url, '_blank', 'noopener,noreferrer');
+                return payload;
+            })
+            .catch(function (e) {
+                setTunnelStatus('Tunnel failed: ' + e.message, true);
+                addLog('error', 'Tunnel failed: ' + e.message);
+            });
+    }
+
+    function renderRomOptions(payload) {
+        if (!romList) return;
+        var roms = payload.roms || [];
+        var activePath = payload.active_rom || '';
+        romList.innerHTML = '';
+        if (!roms.length) {
+            var empty = document.createElement('option');
+            empty.value = '';
+            empty.textContent = 'No uploaded ROMs yet';
+            romList.appendChild(empty);
+            setRomStatus('Upload a user-owned ROM to add a game.', false);
+            return;
+        }
+        roms.forEach(function (item) {
+            var opt = document.createElement('option');
+            opt.value = item.path;
+            opt.textContent = item.name + ' · ' + item.game_type + ' · ' + item.autoplayer_profile + (item.path === activePath ? ' (active)' : '');
+            opt.dataset.launchCommand = item.launch_command || '';
+            opt.dataset.profileDataDir = item.profile_data_dir || '';
+            romList.appendChild(opt);
+        });
+        if (activePath) romList.value = activePath;
+        renderSelectedRomCommand();
+        var mode = payload.switching && payload.switching.mode === 'restart_required' ? 'restart required' : 'ready';
+        setRomStatus('Switching mode: ' + mode + '. Saves/runs/bot memory stay isolated per ROM profile.', false);
+    }
+
+    function renderSelectedRomCommand() {
+        if (!romList || !romLaunchCommand) return;
+        var opt = romList.options[romList.selectedIndex];
+        if (!opt || !opt.value) {
+            romLaunchCommand.textContent = '';
+            return;
+        }
+        romLaunchCommand.textContent = opt.dataset.launchCommand || '';
+    }
+
+    function refreshRoms() {
+        if (!romList) return;
+        fetch(getBaseURL() + '/roms')
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(renderRomOptions)
+            .catch(function (e) {
+                setRomStatus('Could not list ROMs: ' + e.message, true);
+            });
+    }
+
+    function useSelectedRom() {
+        if (!romList || !romList.value) {
+            setRomStatus('Choose a ROM first.', true);
+            return;
+        }
+        fetch(getBaseURL() + '/roms/select', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: romList.value })
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                if (data.active) {
+                    setRomStatus('This ROM is already active.', false);
+                } else {
+                    setRomStatus(data.message || 'Restart required to switch safely.', false);
+                }
+                if (data.rom && romLaunchCommand) romLaunchCommand.textContent = data.rom.launch_command || '';
+            })
+            .catch(function (e) {
+                setRomStatus('ROM selection failed: ' + e.message, true);
+            });
     }
 
     function renderRunOptions(payload) {
@@ -1177,12 +1363,45 @@
         });
     }
 
+    if (btnClearGuidance && botGuidance) {
+        btnClearGuidance.addEventListener('click', function () {
+            botGuidance.value = '';
+            updateAutoplayerControl({ guidance_prompt: '' });
+            addLog('thinking', 'Guidance cleared');
+        });
+    }
+
+    if (botDryRun) {
+        botDryRun.addEventListener('change', function () {
+            updateAutoplayerControl({ dry_run: botDryRun.checked });
+        });
+    }
+
+    if (botAllowOverworld) {
+        botAllowOverworld.addEventListener('change', function () {
+            updateAutoplayerControl({ allow_overworld_movement: botAllowOverworld.checked });
+        });
+    }
+
+    if (botAllowBattle) {
+        botAllowBattle.addEventListener('change', function () {
+            updateAutoplayerControl({ allow_battle_actions: botAllowBattle.checked });
+        });
+    }
+
     if (btnSaveState) btnSaveState.addEventListener('click', saveState);
     if (btnLoadState) btnLoadState.addEventListener('click', loadState);
     if (btnRefreshSaves) btnRefreshSaves.addEventListener('click', refreshSaves);
     if (btnSaveRun) btnSaveRun.addEventListener('click', saveRun);
     if (btnLoadRun) btnLoadRun.addEventListener('click', loadRun);
     if (btnNewRun) btnNewRun.addEventListener('click', newRun);
+    if (romList) romList.addEventListener('change', renderSelectedRomCommand);
+    if (btnUseRom) btnUseRom.addEventListener('click', useSelectedRom);
+    if (btnRefreshRoms) btnRefreshRoms.addEventListener('click', refreshRoms);
+    if (btnTunnelWatch) btnTunnelWatch.addEventListener('click', function () { startTunnel('/dashboard/watch.html', false); });
+    if (btnTunnelUpload) btnTunnelUpload.addEventListener('click', function () { startTunnel('/dashboard/onboarding.html', false); });
+    if (btnShareLive) btnShareLive.addEventListener('click', function () { startTunnel('/dashboard/watch.html', false); });
+    if (btnUploadRom) btnUploadRom.addEventListener('click', function () { startTunnel('/dashboard/onboarding.html', true); });
 
     // --- Corner bracket decorations (bottom corners) ---
     function addBottomCorners() {

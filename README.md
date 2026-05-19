@@ -20,10 +20,14 @@ This repository is focused on the Gold bot work published at
   Game Boy Color-styled broadcast UI.
 - Full local control dashboard for manual controls, bot guidance, saves, runs,
   inventory, team, battle state, and diagnostics.
+- Hermes Games tab metadata for opening upload, watch, and control pages either
+  embedded or in separate browser tabs.
 - Pokemon Gold RAM reader for structured state such as map, position, party,
   bag, battle, story flags, and visual/dialogue signals.
 - Gold V1/V2 autoplayer runners, supervisor service, route planner, gameplay
   policies, and regression tests.
+- Unified learning mode that can delegate Gold/Silver to V2 and use conservative
+  fallback learning for other compatible Game Boy Pokemon ROMs.
 
 ## Requirements
 
@@ -42,6 +46,17 @@ pip install -e ".[pyboy,dashboard,dev]"
 ```
 
 ## Run Pokemon Gold
+
+If you need a browser page for a user to upload their own ROM first, start
+onboarding mode:
+
+```bash
+pokemon-agent onboard --port 9876 --data-dir /home/mojo/.pokemon-agent-gold
+```
+
+Then open `http://localhost:9876/dashboard/onboarding.html`. The page stores
+uploaded `.gb`, `.gbc`, and `.gba` files under the configured data directory and
+prints the exact launch command for the selected ROM.
 
 ```bash
 ./start_pokemon_gold.sh /path/to/pokemon_gold.gbc
@@ -67,12 +82,16 @@ pokemon-agent serve \
 Local endpoints after the server starts:
 
 - Full control dashboard: `http://localhost:9876/dashboard/`
+- ROM upload/onboarding: `http://localhost:9876/dashboard/onboarding.html`
 - Read-only live viewer: `http://localhost:9876/dashboard/watch.html`
 - Health: `http://localhost:9876/health`
 - Structured state: `http://localhost:9876/state`
 - Watch status: `http://localhost:9876/watch/status`
 - Watch chat/viewer WebSocket: `ws://localhost:9876/watch/ws`
 - WebRTC offer endpoint: `POST /rtc/offer`
+
+When launched from Hermes Dashboard's Games tab, the Pokémon card exposes both
+embedded buttons and separate-tab links for Upload, Watch, and Control pages.
 
 For a temporary public read-only viewer tunnel:
 
@@ -91,8 +110,28 @@ The Gold bot has multiple cooperating runners:
 
 - `gold_autoplayer.py`: V1 visual/RAM hybrid controller.
 - `gold_autoplayer_v2.py`: V2 route-planning and gameplay-policy runner.
+- `pokemon_autoplayer.py`: unified learning runner for cross-game profiles.
 - `gold_autoplayer_service.py`: supervisor that starts/stops the selected engine.
 - `gold_autoplayer_watch.py`: status watcher for terminal monitoring.
+
+Dashboard modes:
+
+- `Legacy V1`: older visual/RAM hybrid. Useful for title screens, menus, and
+  unusual states where V2 is too conservative.
+- `Navigation V2`: verified action loop with imported Gold/Silver map registry,
+  route planning, story targets, blocked-edge recovery, and live-action gates.
+- `Unified Learning`: neutral profile runner. For Gold/Silver it reuses V2's
+  verified planner; for other ROMs it records learning facts while using a
+  conservative fallback policy until their map/story plugins mature.
+
+Safety gates are explicit in the dashboard and API:
+
+- `dry_run`: compute actions and learn from observations without posting input.
+- `allow_overworld_movement`: permits walking outside battles.
+- `allow_battle_actions`: permits battle/menu actions while in battle.
+
+Use `/autoplayer/status` to compare the selected engine, supervisor active
+engine, readiness blockers, V2 pathfinding diagnostics, and learning telemetry.
 
 Runtime control and status files are stored under the configured data directory,
 typically `/home/mojo/.pokemon-agent-gold/`:
@@ -101,6 +140,28 @@ typically `/home/mojo/.pokemon-agent-gold/`:
 - `gold_autoplayer_status.json`
 - `gold_autoplayer_supervisor_status.json`
 - `gold_autoplayer_v2.jsonl`
+- `gold_autoplayer_v2_learning.json`
+- `pokemon_learning_memory.json`
+
+## Fair-Play Learning
+
+The bot is designed to learn from the same observations it can legitimately see:
+`/state`, `/screenshot`, action results, and verified transitions. V2 may use the
+public/static map registry for pathfinding, but learned facts remain tagged by
+source and confidence and are stored under the ROM/profile data directory.
+
+Current learning techniques are intentionally pragmatic and transparent:
+
+- V1 persists bandit-like visual/action values and a world model.
+- V2 persists transition rewards, action statistics, tile visits, and blocked-edge
+  evidence in `gold_autoplayer_v2_learning.json`.
+- Unified mode persists categorized `PKM:` facts in `pokemon_learning_memory.json`.
+- Learned values are used for diagnostics and future tie-breaking; they do not
+  override V2's verified planner unless explicitly implemented and tested.
+
+Do not use save-state search, future hidden information, hidden RNG reads, or ROM
+data not surfaced through the server state/vision APIs to pick actions. User
+objective/guidance in the dashboard should override learned preferences.
 
 ## API Quick Reference
 
@@ -113,7 +174,8 @@ typically `/home/mojo/.pokemon-agent-gold/`:
 - `GET /runs`, `POST /runs/save`, `POST /runs/load`, `POST /runs/new`: named run
   snapshots.
 - `GET /autoplayer/status`: bot control/status/telemetry payload.
-- `POST /autoplayer/control`: enable/disable the bot and select V1/V2 settings.
+- `POST /autoplayer/control`: enable/disable the bot, select V1/V2/unified mode,
+  set objective/guidance, and update live-action safety gates.
 - `GET /rtc/debug/perf`: WebRTC media pump diagnostics.
 - `GET /watch/status`, `WS /watch/ws`: viewer count and shared watch chat.
 

@@ -112,6 +112,80 @@ body {
     white-space: nowrap;
 }
 
+.header-link {
+    color: var(--accent);
+    border: 1px solid rgba(88, 166, 255, 0.35);
+    background: rgba(88, 166, 255, 0.08);
+    border-radius: 999px;
+    padding: 4px 8px;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.header-button {
+    font: inherit;
+    cursor: pointer;
+}
+
+.header-link:hover {
+    color: var(--text-bright);
+    border-color: var(--accent);
+}
+
+.launch-command {
+    min-height: 38px;
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.22);
+    color: var(--accent-green);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+}
+
+.share-links {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.share-links a {
+    color: var(--accent);
+    word-break: break-all;
+}
+
+.safety-row {
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 8px 0;
+}
+
+.bot-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.bot-check input {
+    accent-color: var(--accent);
+}
+
+.bot-readiness {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(240, 136, 62, 0.06);
+    font-size: 11px;
+}
+
 .status-dot {
     width: 8px;
     height: 8px;

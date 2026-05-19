@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
-VALID_ENGINES = {"v1", "v2"}
+VALID_ENGINES = {"v1", "v2", "unified"}
 
 
 class ChildProcess(Protocol):
@@ -76,6 +76,15 @@ class AutoplayerSupervisor:
             return [
                 self.python,
                 str(root / "gold_autoplayer_v2.py"),
+                "--base-url",
+                self.base_url,
+                "--data-dir",
+                str(self.data_dir),
+            ]
+        if engine == "unified":
+            return [
+                self.python,
+                str(root / "pokemon_autoplayer.py"),
                 "--base-url",
                 self.base_url,
                 "--data-dir",

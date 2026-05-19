@@ -98,6 +98,26 @@ def test_supervisor_builds_v2_command_with_shared_data_dir(tmp_path):
     assert "--delay" not in command
 
 
+def test_supervisor_builds_unified_command_with_shared_data_dir(tmp_path):
+    service = supervisor(tmp_path)
+
+    command = service.command_for_engine("unified")
+
+    assert command[0] == "python-test"
+    assert command[1].endswith("pokemon_autoplayer.py")
+    assert "--base-url" in command
+    assert "http://127.0.0.1:9879" in command
+    assert "--data-dir" in command
+    assert str(tmp_path) in command
+
+
+def test_supervisor_accepts_unified_engine(tmp_path):
+    write_control(tmp_path, "unified")
+    service = supervisor(tmp_path)
+
+    assert service.read_engine() == "unified"
+
+
 def test_supervisor_restarts_child_when_engine_changes(tmp_path):
     factory = FakeFactory()
     service = supervisor(tmp_path, factory)

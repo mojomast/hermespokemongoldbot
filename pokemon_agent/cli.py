@@ -3,6 +3,7 @@ Pokemon Agent — CLI entry point.
 
 Usage:
     pokemon-agent serve --rom path/to/rom.gba [--port 8765] [--data-dir ~/.pokemon-agent]
+    pokemon-agent onboard [--port 8765] [--data-dir ~/.pokemon-agent]
     pokemon-agent info  --rom path/to/rom.gba
     pokemon-agent --version
 """
@@ -73,6 +74,32 @@ def cmd_serve(args):
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
 
 
+def cmd_onboard(args):
+    """Start the dashboard/upload server without loading a ROM."""
+    data_dir = Path(args.data_dir).expanduser().resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "roms").mkdir(exist_ok=True)
+
+    print(BANNER.format(version=__version__))
+    print("  Mode:      ROM onboarding")
+    print(f"  Port:      {args.port}")
+    print(f"  Data dir:  {data_dir}")
+    print(f"  Upload:    http://localhost:{args.port}/dashboard/onboarding.html")
+    print()
+
+    from pokemon_agent.server import GameConfig, configure, app  # noqa: F811
+
+    configure(GameConfig(
+        rom_path="",
+        game_type="auto",
+        port=args.port,
+        data_dir=str(data_dir),
+    ))
+
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+
+
 def cmd_info(args):
     """Display ROM information."""
     rom = Path(args.rom).expanduser().resolve()
@@ -124,6 +151,14 @@ def main():
         help="Name of a saved state to auto-load on startup (e.g. 'intro_complete')",
     )
 
+    # --- onboard ---
+    onboard_p = sub.add_parser("onboard", help="Start ROM upload/onboarding dashboard")
+    onboard_p.add_argument("--port", type=int, default=8765, help="Server port (default: 8765)")
+    onboard_p.add_argument(
+        "--data-dir", default="~/.pokemon-agent",
+        help="Data directory for uploaded ROMs and saves (default: ~/.pokemon-agent)",
+    )
+
     # --- info ---
     info_p = sub.add_parser("info", help="Show ROM information")
     info_p.add_argument("--rom", required=True, help="Path to Pokemon ROM file")
@@ -132,6 +167,8 @@ def main():
 
     if args.command == "serve":
         cmd_serve(args)
+    elif args.command == "onboard":
+        cmd_onboard(args)
     elif args.command == "info":
         cmd_info(args)
     else:

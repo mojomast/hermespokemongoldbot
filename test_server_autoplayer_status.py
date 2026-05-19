@@ -96,6 +96,16 @@ def test_autoplayer_control_can_set_v2_safety_gates(tmp_path):
         server._config = previous
 
 
+def test_autoplayer_control_accepts_unified_engine(tmp_path):
+    previous = configure_server_data_dir(tmp_path)
+    try:
+        payload = asyncio.run(server.autoplayer_control(server.AutoplayerControlRequest(engine="unified")))
+
+        assert payload["control"]["engine"] == "unified"
+    finally:
+        server._config = previous
+
+
 def test_autoplayer_status_includes_v2_readiness_even_when_v1_active(tmp_path):
     previous = configure_server_data_dir(tmp_path)
     try:
@@ -109,6 +119,22 @@ def test_autoplayer_status_includes_v2_readiness_even_when_v1_active(tmp_path):
         assert "engine_not_selected" in payload["v2_readiness"]["blockers"]
         assert "dry_run_enabled" in payload["v2_readiness"]["blockers"]
         assert payload["v2_readiness"]["latest_event"] == {"engine": "v2", "event": "turn"}
+    finally:
+        server._config = previous
+
+
+def test_autoplayer_status_tails_unified_log_when_unified_active(tmp_path):
+    previous = configure_server_data_dir(tmp_path)
+    try:
+        write_json(tmp_path / "gold_autoplayer_control.json", {"engine": "unified"})
+        write_json(tmp_path / "gold_autoplayer_status.json", {"engine": "v2", "schema_version": 2})
+        write_jsonl(tmp_path / "pokemon_autoplayer.jsonl", [{"engine": "unified", "event": "turn"}])
+
+        payload = asyncio.run(server.autoplayer_status())
+
+        assert payload["recent"] == [{"engine": "unified", "event": "turn"}]
+        assert payload["logs"]["active"].endswith("pokemon_autoplayer.jsonl")
+        assert payload["logs"]["v2_learning"].endswith("gold_autoplayer_v2_learning.json")
     finally:
         server._config = previous
 

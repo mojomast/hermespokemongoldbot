@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hermes Pokemon ROM Onboarding</title>
+    <link rel="stylesheet" href="onboarding.css?v=1">
+</head>
+<body>
+    <main class="onboarding-shell">
+        <section class="hero">
+            <p class="eyebrow">Hermes Pokemon Player</p>
+            <h1>Upload Your Own ROM</h1>
+            <p class="subtitle">Use a legally owned Pokemon ROM to start a local bot run. ROMs stay on this machine under the configured pokemon-agent data directory.</p>
+        </section>
+
+        <section class="card warning-card">
+            <h2>Before You Upload</h2>
+            <p>This project does not provide, download, or distribute Pokemon ROMs. Upload only ROM files you legally own.</p>
+            <p>Compatible file extensions: <strong>.gb</strong>, <strong>.gbc</strong>, and <strong>.gba</strong>. Gold/Silver are currently the strongest autoplayer targets; Red/Blue have structured RAM support; Yellow still needs validation.</p>
+        </section>
+
+        <section class="card upload-card">
+            <h2>1. Pick ROM</h2>
+            <label class="drop-zone" id="dropZone">
+                <input id="romFile" type="file" accept=".gb,.gbc,.gba">
+                <span id="fileLabel">Choose or drop a .gb/.gbc/.gba ROM</span>
+            </label>
+            <button id="uploadButton" type="button">Upload ROM</button>
+            <div id="uploadStatus" class="status-box">Waiting for a ROM file.</div>
+        </section>
+
+        <section class="card">
+            <div class="section-row">
+                <h2>2. Uploaded ROMs</h2>
+                <button id="refreshButton" type="button">Refresh</button>
+            </div>
+            <div id="romList" class="rom-list">Loading uploaded ROMs...</div>
+        </section>
+
+        <section class="card">
+            <h2>3. Start Playing</h2>
+            <p>Uploading stores the ROM. The emulator loads ROMs at server startup, so start or restart pokemon-agent with the launch command shown for the ROM you want.</p>
+            <pre id="launchCommand" class="command-box">Upload a ROM to generate a launch command.</pre>
+            <div class="link-grid">
+                <a href="/dashboard/watch.html">Open Live Viewer</a>
+                <a href="/dashboard/">Open Control Dashboard</a>
+            </div>
+        </section>
+    </main>
+    <script src="onboarding.js?v=1"></script>
+</body>
+</html>

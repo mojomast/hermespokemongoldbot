@@ -7,10 +7,12 @@ running a Pokemon ROM, reading game state, and broadcasting events.
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
 import re
+import subprocess
 import time
 from collections import deque
 from functools import partial
@@ -18,7 +20,7 @@ from pathlib import Path
 from fractions import Fraction
 from typing import Any, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -64,6 +66,16 @@ class AutoplayerControlRequest(BaseModel):
     dry_run: Optional[bool] = None
     allow_overworld_movement: Optional[bool] = None
     allow_battle_actions: Optional[bool] = None
+
+
+class TunnelStartRequest(BaseModel):
+    """Body for POST /tunnel/start."""
+    path: str = "/dashboard/watch.html"
+
+
+class RomSelectRequest(BaseModel):
+    """Body for POST /roms/select."""
+    path: str
 
 
 class RTCSessionDescriptionRequest(BaseModel):
@@ -137,6 +149,62 @@ def _run_path(name: str) -> Path:
 
 def _save_path(name: str) -> Path:
     return _data_dir() / "saves" / f"{_safe_save_name(name)}.state"
+
+
+def _roms_dir() -> Path:
+    return _data_dir() / "roms"
+
+
+def _safe_rom_name(name: str) -> str:
+    original = Path(name or "").name
+    ext = Path(original).suffix.lower()
+    if ext not in {".gb", ".gbc", ".gba"}:
+        raise HTTPException(status_code=400, detail="ROM must be a .gb, .gbc, or .gba file")
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(original).stem).strip("._")
+    if not stem:
+        raise HTTPException(status_code=400, detail="ROM filename is required")
+    return f"{stem[:80]}{ext}"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _rom_info(path: Path) -> dict[str, Any]:
+    path = path.expanduser().resolve()
+    ext = path.suffix.lower()
+    supported_extension = ext in {".gb", ".gbc", ".gba"}
+    try:
+        game_type = _detect_game_type(str(path)) if supported_extension else "unsupported"
+    except Exception:
+        game_type = "unsupported"
+    port = _config.port if _config is not None else 9876
+    data_dir = _data_dir().expanduser().resolve()
+    sha256 = _sha256_file(path) if path.exists() else None
+    profile_data_dir = data_dir / "games" / f"{game_type}-{sha256[:12] if sha256 else 'unknown'}"
+    launch_command = (
+        f"pokemon-agent serve --rom {json.dumps(str(path))} "
+        f"--port {port} --data-dir {json.dumps(str(profile_data_dir))}"
+    )
+    return {
+        "name": path.name,
+        "path": str(path),
+        "size_bytes": path.stat().st_size if path.exists() else 0,
+        "sha256": sha256,
+        "extension": ext,
+        "game_type": game_type,
+        "supported": supported_extension and game_type != "unsupported",
+        "autoplayer_profile": "gold_silver" if game_type == "gold" else ("red_blue" if game_type == "red" else "generic"),
+        "active": bool(_config and Path(_config.rom_path).expanduser().resolve() == path),
+        "profile_data_dir": str(profile_data_dir),
+        "launch_command": launch_command,
+        "dashboard_url": f"http://localhost:{port}/dashboard/",
+        "watch_url": f"http://localhost:{port}/dashboard/watch.html",
+    }
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -607,6 +675,23 @@ def _load_emulator_from_config() -> str:
     return game_type
 
 
+def _mount_dashboard() -> None:
+    if any(getattr(route, "path", None) == "/dashboard" for route in app.routes):
+        return
+    try:
+        import pokemon_agent.dashboard as dashboard_mod  # noqa: F401
+        from fastapi.staticfiles import StaticFiles
+        dash_dir = Path(dashboard_mod.__file__).parent / "static"
+        if dash_dir.is_dir():
+            app.mount("/dashboard", StaticFiles(directory=str(dash_dir), html=True), name="dashboard")
+            print("[server] Dashboard mounted at /dashboard")
+        else:
+            print("[server] Dashboard module found but no static/ directory")
+    except ImportError:
+        print("[server] Dashboard not installed — /dashboard unavailable")
+        print("[server]   Install with: pip install pokemon-agent[dashboard]")
+
+
 def _data_dir() -> Path:
     if _config is None:
         return Path("~/.pokemon-agent").expanduser()
@@ -627,6 +712,18 @@ def _autoplayer_log_path() -> Path:
 
 def _autoplayer_v2_log_path() -> Path:
     return _data_dir() / "gold_autoplayer_v2.jsonl"
+
+
+def _autoplayer_unified_log_path() -> Path:
+    return _data_dir() / "pokemon_autoplayer.jsonl"
+
+
+def _autoplayer_v2_learning_path() -> Path:
+    return _data_dir() / "gold_autoplayer_v2_learning.json"
+
+
+def _autoplayer_unified_learning_path() -> Path:
+    return _data_dir() / "pokemon_learning_memory.json"
 
 
 def _autoplayer_world_path() -> Path:
@@ -709,6 +806,89 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def _tunnel_log_path() -> Path:
+    return Path(os.environ.get("POKEMON_TUNNEL_LOG", "/tmp/pokemon-localhost-run.log"))
+
+
+def _tunnel_launch_log_path() -> Path:
+    return Path(os.environ.get("POKEMON_TUNNEL_LAUNCH_LOG", "/tmp/pokemon-localhost-run-launch.log"))
+
+
+def _tunnel_script_path() -> Path:
+    override = os.environ.get("POKEMON_TUNNEL_SCRIPT")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parents[1] / "start_pokemon_tunnel.sh"
+
+
+def _public_tunnel_url() -> Optional[str]:
+    log_path = _tunnel_log_path()
+    try:
+        text = log_path.read_text(errors="replace")[-20000:]
+    except Exception:
+        return None
+    matches = re.findall(r"https://[a-z0-9-]+\.lhr\.life", text)
+    return matches[-1] if matches else None
+
+
+def _tunnel_process_running() -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "ssh .*nokey@localhost.run"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _public_path(path: str) -> str:
+    path = (path or "/dashboard/watch.html").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
+def _tunnel_payload(path: str = "/dashboard/watch.html") -> dict[str, Any]:
+    base_url = _public_tunnel_url()
+    path = _public_path(path)
+    return {
+        "running": _tunnel_process_running(),
+        "base_url": base_url,
+        "path": path,
+        "url": f"{base_url}{path}" if base_url else None,
+        "watch_url": f"{base_url}/dashboard/watch.html" if base_url else None,
+        "upload_url": f"{base_url}/dashboard/onboarding.html" if base_url else None,
+        "control_url": f"{base_url}/dashboard/" if base_url else None,
+        "log_path": str(_tunnel_log_path()),
+    }
+
+
+def _start_tunnel_process() -> None:
+    if _tunnel_process_running():
+        return
+    script = _tunnel_script_path()
+    if not script.exists():
+        raise HTTPException(status_code=500, detail=f"Tunnel script not found: {script}")
+    port = str(_config.port if _config is not None else 9876)
+    env = os.environ.copy()
+    env["POKEMON_AGENT_PORT"] = port
+    env["POKEMON_TUNNEL_LOG"] = str(_tunnel_log_path())
+    launch_log = _tunnel_launch_log_path()
+    launch_log.parent.mkdir(parents=True, exist_ok=True)
+    with launch_log.open("ab") as handle:
+        subprocess.Popen(
+            [str(script)],
+            cwd=str(script.parent),
+            env=env,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+
 def _v2_readiness(control: dict, status: dict, recent_v2: list[dict], supervisor: dict, supervisor_health: dict) -> dict:
     status_is_v2 = isinstance(status, dict) and status.get("engine") == "v2"
     updated = status.get("updated_at") if status_is_v2 else None
@@ -718,7 +898,7 @@ def _v2_readiness(control: dict, status: dict, recent_v2: list[dict], supervisor
     runner = status.get("runner") if status_is_v2 and isinstance(status.get("runner"), dict) else {}
     readiness = status.get("readiness") if status_is_v2 and isinstance(status.get("readiness"), dict) else {}
     blockers: list[str] = []
-    if control.get("engine") != "v2":
+    if control.get("engine") not in {"v2", "unified"}:
         blockers.append("engine_not_selected")
     if not status_is_v2:
         blockers.append("v2_status_unavailable")
@@ -730,8 +910,8 @@ def _v2_readiness(control: dict, status: dict, recent_v2: list[dict], supervisor
         blockers.append("overworld_movement_disabled")
     if control.get("allow_battle_actions") is not True:
         blockers.append("battle_actions_disabled")
-    if supervisor and supervisor.get("active_engine") != "v2":
-        blockers.append("supervisor_not_running_v2")
+    if supervisor and supervisor.get("active_engine") not in {"v2", "unified"}:
+        blockers.append("supervisor_not_running_v2_or_unified")
     if supervisor and not supervisor_health.get("healthy"):
         blockers.append("supervisor_unhealthy")
     return {
@@ -922,10 +1102,21 @@ async def _startup():
     _loop = asyncio.get_running_loop()
     _start_time = time.time()
 
+    data_dir = _data_dir().expanduser().resolve()
+    (data_dir / "saves").mkdir(parents=True, exist_ok=True)
+    (data_dir / "runs").mkdir(parents=True, exist_ok=True)
+    (data_dir / "roms").mkdir(parents=True, exist_ok=True)
+    _mount_dashboard()
+
     if _config is None:
         # Config can be injected via environment or set beforehand
         print("[server] WARNING: No GameConfig set — emulator will NOT start.")
         print("[server] Call server.configure(GameConfig(...)) before startup.")
+        return
+
+    if not _config.rom_path:
+        print("[server] Onboarding mode — no ROM configured, emulator will NOT start.")
+        print(f"[server] Upload page: http://localhost:{_config.port}/dashboard/onboarding.html")
         return
 
     rom = Path(_config.rom_path).expanduser().resolve()
@@ -942,25 +1133,6 @@ async def _startup():
     print(f"[server] Detected game type: {game_type}")
 
     _load_emulator_from_config()
-
-    # Create data directories
-    data_dir = Path(_config.data_dir).expanduser().resolve()
-    (data_dir / "saves").mkdir(parents=True, exist_ok=True)
-    (data_dir / "runs").mkdir(parents=True, exist_ok=True)
-
-    # Try mounting dashboard
-    try:
-        import pokemon_agent.dashboard as dashboard_mod  # noqa: F401
-        from fastapi.staticfiles import StaticFiles
-        dash_dir = Path(dashboard_mod.__file__).parent / "static"
-        if dash_dir.is_dir():
-            app.mount("/dashboard", StaticFiles(directory=str(dash_dir), html=True), name="dashboard")
-            print(f"[server] Dashboard mounted at /dashboard")
-        else:
-            print("[server] Dashboard module found but no static/ directory")
-    except ImportError:
-        print("[server] Dashboard not installed — /dashboard unavailable")
-        print("[server]   Install with: pip install pokemon-agent[dashboard]")
 
     # Auto-load a save state if specified
     if _config.load_state:
@@ -1017,7 +1189,109 @@ async def index():
 @app.get("/health")
 async def health():
     """Health check."""
-    return {"status": "ok", "emulator_ready": _emulator is not None, "rtc_peers": len(_rtc_peers)}
+    return {
+        "status": "ok",
+        "emulator_ready": _emulator is not None,
+        "rtc_peers": len(_rtc_peers),
+        "game": _config.game_type if _config else None,
+        "rom": _config.rom_path if _config else None,
+        "data_dir": str(_data_dir()),
+    }
+
+
+@app.get("/roms")
+async def list_roms():
+    """List locally uploaded ROMs and launch instructions."""
+    roms_dir = _roms_dir()
+    roms_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for path in sorted(roms_dir.iterdir(), key=lambda p: p.name.lower()):
+        if path.is_file() and path.suffix.lower() in {".gb", ".gbc", ".gba"}:
+            rows.append(_rom_info(path))
+    active_info = None
+    if _config and _config.rom_path:
+        active_path = Path(_config.rom_path).expanduser()
+        if active_path.exists():
+            active_info = _rom_info(active_path)
+    return {
+        "roms": rows,
+        "upload_path": str(roms_dir),
+        "active_rom": _config.rom_path if _config else None,
+        "active": active_info,
+        "switching": {
+            "mode": "restart_required",
+            "reason": "Each ROM uses isolated saves, runs, and autoplayer memory. Start the selected ROM with its profile data directory.",
+        },
+    }
+
+
+@app.post("/roms/upload")
+async def upload_rom(request: Request):
+    """Upload a user-owned ROM as raw request bytes.
+
+    The browser onboarding page sends the selected file as the request body and
+    provides the filename in X-ROM-Filename. This avoids a multipart dependency
+    and keeps the endpoint usable in onboarding-only installs.
+    """
+    name = request.headers.get("x-rom-filename") or ""
+    safe_name = _safe_rom_name(name)
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Uploaded ROM is empty")
+    max_bytes = int(os.environ.get("POKEMON_AGENT_MAX_ROM_BYTES", str(64 * 1024 * 1024)))
+    if len(body) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"ROM exceeds {max_bytes} byte upload limit")
+    roms_dir = _roms_dir()
+    roms_dir.mkdir(parents=True, exist_ok=True)
+    path = roms_dir / safe_name
+    path.write_bytes(body)
+    return {"ok": True, "rom": _rom_info(path)}
+
+
+@app.post("/roms/select")
+async def select_rom(req: RomSelectRequest):
+    """Return safe launch instructions for a ROM profile.
+
+    ROM switching is intentionally restart-based so emulator save states, run
+    manifests, and autoplayer memories do not cross-contaminate games.
+    """
+    path = Path(req.path).expanduser().resolve()
+    roms_dir = _roms_dir().expanduser().resolve()
+    active_path = Path(_config.rom_path).expanduser().resolve() if _config and _config.rom_path else None
+    if active_path and path == active_path:
+        return {"ok": True, "active": True, "rom": _rom_info(path), "restart_required": False}
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="ROM not found")
+    try:
+        path.relative_to(roms_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Only uploaded ROMs can be selected from the dashboard")
+    info = _rom_info(path)
+    return {
+        "ok": True,
+        "active": False,
+        "rom": info,
+        "restart_required": True,
+        "message": "Restart pokemon-agent with this command to switch games safely.",
+    }
+
+
+@app.get("/tunnel/status")
+async def tunnel_status(path: str = "/dashboard/watch.html"):
+    """Current localhost.run tunnel URL, if one is active or recently logged."""
+    return _tunnel_payload(path)
+
+
+@app.post("/tunnel/start")
+async def tunnel_start(req: TunnelStartRequest):
+    """Start or reuse the public localhost.run tunnel and return share links."""
+    await asyncio.to_thread(_start_tunnel_process)
+    deadline = time.time() + 12
+    payload = _tunnel_payload(req.path)
+    while time.time() < deadline and not payload.get("base_url"):
+        await asyncio.sleep(0.5)
+        payload = _tunnel_payload(req.path)
+    return payload
 
 
 @app.get("/state")
@@ -1353,14 +1627,15 @@ def _build_autoplayer_status_payload() -> dict:
     if isinstance(status, dict):
         status.setdefault("engine", control.get("engine", "v1"))
     active_engine = control.get("engine", "v1")
-    if active_engine not in {"v1", "v2"} and isinstance(status, dict):
+    if active_engine not in {"v1", "v2", "unified"} and isinstance(status, dict):
         active_engine = status.get("engine") or status.get("selected_engine") or "v1"
-    active_log_path = _autoplayer_v2_log_path() if active_engine == "v2" else _autoplayer_log_path()
+    active_log_path = _autoplayer_v2_log_path() if active_engine == "v2" else (_autoplayer_unified_log_path() if active_engine == "unified" else _autoplayer_log_path())
     recent_v1 = _tail_jsonl(_autoplayer_log_path(), limit=30)
     recent_v2 = _tail_jsonl(_autoplayer_v2_log_path(), limit=30)
-    recent = recent_v2 if active_engine == "v2" else recent_v1
-    if isinstance(status, dict) and control.get("engine") == "v2" and status.get("engine") != "v2":
-        status.setdefault("visibility_warning", "V2 selected but latest status is not from V2 runner")
+    recent_unified = _tail_jsonl(_autoplayer_unified_log_path(), limit=30)
+    recent = recent_v2 if active_engine == "v2" else (recent_unified if active_engine == "unified" else recent_v1)
+    if isinstance(status, dict) and control.get("engine") in {"v2", "unified"} and status.get("engine") != "v2":
+        status.setdefault("visibility_warning", "V2/unified selected but latest status is not from V2 runner")
     supervisor = _read_json_file(_autoplayer_supervisor_status_path(), {})
     supervisor_health = _supervisor_health(supervisor if isinstance(supervisor, dict) else {})
     v2_readiness = _v2_readiness(control, status if isinstance(status, dict) else {}, recent_v2, supervisor if isinstance(supervisor, dict) else {}, supervisor_health)
@@ -1387,10 +1662,14 @@ def _build_autoplayer_status_payload() -> dict:
         "recent": recent,
         "recent_v1": recent_v1,
         "recent_v2": recent_v2,
+        "recent_unified": recent_unified,
         "logs": {
             "active": str(active_log_path),
             "v1": str(_autoplayer_log_path()),
             "v2": str(_autoplayer_v2_log_path()),
+            "unified": str(_autoplayer_unified_log_path()),
+            "v2_learning": str(_autoplayer_v2_learning_path()),
+            "unified_learning": str(_autoplayer_unified_learning_path()),
         },
         "supervisor": supervisor,
         "supervisor_health": supervisor_health,
@@ -1414,8 +1693,8 @@ async def autoplayer_control(req: AutoplayerControlRequest):
     control = _default_autoplayer_control()
     control.update(_read_json_file(path, {}))
     updates = req.dict(exclude_none=True)
-    if "engine" in updates and updates["engine"] not in {"v1", "v2"}:
-        raise HTTPException(status_code=400, detail="engine must be v1 or v2")
+    if "engine" in updates and updates["engine"] not in {"v1", "v2", "unified"}:
+        raise HTTPException(status_code=400, detail="engine must be v1, v2, or unified")
     if "movement_bias" in updates and updates["movement_bias"] not in {"west_north", "north_east", "balanced"}:
         raise HTTPException(status_code=400, detail="movement_bias must be west_north, north_east, or balanced")
     if "dialogue_speed" in updates and updates["dialogue_speed"] not in {"fast", "normal"}:
