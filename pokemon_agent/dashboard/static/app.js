@@ -846,6 +846,12 @@
             + ' · <strong>V2 live</strong>: ' + (readiness.ready_for_live_actions ? 'ready' : 'blocked');
         if (blockers.length) html += '<br><strong>Blockers</strong>: ' + blockers.join(', ');
         if (warnings.length) html += '<br><strong>Warnings</strong>: ' + warnings.join(', ');
+        var modePolicy = (payload.status || {}).mode_policy || {};
+        if (modePolicy.selected) {
+            html += '<br><strong>Mode policy</strong>: optimal ' + (modePolicy.optimal || '---')
+                + ' · fallback ' + (modePolicy.fallback_active ? 'active' : 'idle')
+                + ' · return ' + (modePolicy.return_policy || '---');
+        }
         botReadiness.innerHTML = html;
         botReadiness.style.color = blockers.length || warnings.length ? 'var(--accent-amber)' : 'var(--accent-green)';
     }

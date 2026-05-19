@@ -106,6 +106,42 @@ def test_autoplayer_control_accepts_unified_engine(tmp_path):
         server._config = previous
 
 
+def test_autoplayer_control_accepts_adaptive_engine(tmp_path):
+    previous = configure_server_data_dir(tmp_path)
+    try:
+        payload = asyncio.run(server.autoplayer_control(server.AutoplayerControlRequest(engine="adaptive")))
+
+        assert payload["control"]["engine"] == "adaptive"
+    finally:
+        server._config = previous
+
+
+def test_autoplayer_control_accepts_handoff_settings(tmp_path):
+    previous = configure_server_data_dir(tmp_path)
+    try:
+        payload = asyncio.run(server.autoplayer_control(server.AutoplayerControlRequest(
+            engine="adaptive",
+            auto_handoff_enabled=True,
+            auto_handoff_v1_fallback="adaptive",
+            auto_handoff_v2_fallback="v1",
+        )))
+
+        assert payload["control"]["auto_handoff_enabled"] is True
+        assert payload["control"]["auto_handoff_v1_fallback"] == "adaptive"
+        assert payload["control"]["auto_handoff_v2_fallback"] == "v1"
+    finally:
+        server._config = previous
+
+
+def test_autoplayer_control_rejects_invalid_handoff_engine(tmp_path):
+    previous = configure_server_data_dir(tmp_path)
+    try:
+        with pytest.raises(server.HTTPException):
+            asyncio.run(server.autoplayer_control(server.AutoplayerControlRequest(auto_handoff_v2_fallback="bad")))
+    finally:
+        server._config = previous
+
+
 def test_autoplayer_status_includes_v2_readiness_even_when_v1_active(tmp_path):
     previous = configure_server_data_dir(tmp_path)
     try:

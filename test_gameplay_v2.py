@@ -1,6 +1,6 @@
 from gold_autoplayer_v2 import GoldAutoplayerV2
 from pokemon_agent.gameplay import choose_catch_action, roster_roles, snapshot_from_state, summarize_inventory
-from pokemon_agent.gameplay.story import ELMS_LAB_RETURN_TARGET, ROUTE31_GRIND_TARGET, VIOLET_MART_BUY_TARGET, VIOLET_POKECENTER_HEAL_TARGET, explain_story_objective
+from pokemon_agent.gameplay.story import ELMS_LAB_RETURN_TARGET, ROUTE31_GRIND_TARGET, VIOLET_MART_BUY_TARGET, VIOLET_POKECENTER_HEAL_TARGET, explain_story_objective, registry_exploration_targets
 
 
 def make_state(**overrides):
@@ -367,3 +367,37 @@ def test_story_routes_with_balls_and_low_level_to_route31_grind():
 
     assert decision.objective_key == "route31_grind"
     assert decision.target == ROUTE31_GRIND_TARGET
+
+
+def test_story_fallback_after_scripted_targets_uses_registry_transition():
+    state = make_state()
+    state["player"]["badges"] = ["Zephyr"]
+    state["player"]["position"] = {
+        "map_group": 3,
+        "map_number": 40,
+        "map_name": "Slowpoke Well B1F",
+        "actual_x": 17,
+        "actual_y": 14,
+    }
+
+    decision = explain_story_objective(state)
+
+    assert decision.objective_key == "registry_exploration"
+    assert decision.target is not None
+    assert decision.target.map_key == (8, 7)
+
+
+def test_registry_exploration_returns_reachable_targets_only():
+    state = make_state()
+    state["player"]["position"] = {
+        "map_group": 3,
+        "map_number": 40,
+        "map_name": "Slowpoke Well B1F",
+        "actual_x": 17,
+        "actual_y": 14,
+    }
+
+    targets = registry_exploration_targets(state)
+
+    assert targets
+    assert all(target.tiles for target in targets)

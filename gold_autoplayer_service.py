@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
-VALID_ENGINES = {"v1", "v2", "unified"}
+VALID_ENGINES = {"v1", "v2", "unified", "adaptive"}
+GOLD_ENGINES = {"v1", "v2", "adaptive"}
+HANDOFF_COOLDOWN_SECONDS = 20.0
 
 
 class ChildProcess(Protocol):
@@ -53,6 +55,7 @@ class AutoplayerSupervisor:
     restart_delay_seconds: float = 0.0
     min_restart_delay: float = 1.0
     max_restart_delay: float = 30.0
+    last_handoff: dict[str, Any] | None = None
 
     @property
     def control_path(self) -> Path:
@@ -63,16 +66,84 @@ class AutoplayerSupervisor:
         return self.data_dir / "gold_autoplayer_supervisor_status.json"
 
     def read_engine(self) -> str:
+        return self.engine_for_control(self.read_control())
+
+    def read_control(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.control_path.read_text())
         except Exception:
-            return "v1"
-        engine = payload.get("engine") if isinstance(payload, dict) else None
+            payload = {}
+        control = payload if isinstance(payload, dict) else {}
+        control.setdefault("engine", "v1")
+        control.setdefault("auto_handoff_enabled", True)
+        control.setdefault("auto_handoff_v1_fallback", "adaptive")
+        control.setdefault("auto_handoff_v2_fallback", "v1")
+        return control
+
+    def engine_for_control(self, control: dict[str, Any]) -> str:
+        engine = control.get("engine") if isinstance(control, dict) else None
         return engine if engine in VALID_ENGINES else "v1"
+
+    @property
+    def runner_status_path(self) -> Path:
+        return self.data_dir / "gold_autoplayer_status.json"
+
+    def read_runner_status(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.runner_status_path.read_text())
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def write_control(self, control: dict[str, Any]) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.control_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(control, indent=2, sort_keys=True))
+        tmp.replace(self.control_path)
+
+    def handoff_engine_for_status(self, engine: str, control: dict[str, Any], status: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        if control.get("auto_handoff_enabled") is not True:
+            return engine, None
+        now = time.time()
+        handoff_state = control.get("auto_handoff") if isinstance(control.get("auto_handoff"), dict) else {}
+        cooldown_until = handoff_state.get("cooldown_until")
+        if isinstance(cooldown_until, (int, float)) and now < cooldown_until:
+            return engine, None
+        profile = status.get("profile") or ((status.get("runner") or {}).get("profile") if isinstance(status.get("runner"), dict) else None)
+        if profile and profile not in {"gold_silver", "gold", "silver"}:
+            return engine, None
+        navigation = status.get("navigation") if isinstance(status.get("navigation"), dict) else {}
+        hard_stuck = (
+            navigation.get("path_source") in {"safety_circuit_breaker", "safety_button_circuit_breaker"}
+            or int(navigation.get("recovery_level", 0) or 0) >= 2
+            or int(navigation.get("stuck_counter", 0) or 0) >= 3
+            or int(navigation.get("button_failures", 0) or 0) >= 3
+        )
+        v1_stuck = bool(status.get("stuck") or status.get("position_stuck") or status.get("coord_oscillating"))
+        if engine in {"v2", "adaptive", "unified"} and hard_stuck:
+            target = str(control.get("auto_handoff_v2_fallback") or "v1")
+            reason = f"{engine}_hard_stuck"
+        elif engine == "v1" and v1_stuck:
+            target = str(control.get("auto_handoff_v1_fallback") or "adaptive")
+            reason = "v1_stuck"
+        else:
+            return engine, None
+        if target not in VALID_ENGINES or target == engine:
+            return engine, None
+        if engine == "unified" and profile and profile != "gold_silver":
+            return engine, None
+        return target, {
+            "from": engine,
+            "to": target,
+            "reason": reason,
+            "path_source": navigation.get("path_source"),
+            "updated_at": now,
+            "cooldown_until": now + HANDOFF_COOLDOWN_SECONDS,
+        }
 
     def command_for_engine(self, engine: str) -> list[str]:
         root = Path(__file__).resolve().parent
-        if engine == "v2":
+        if engine in {"v2", "adaptive"}:
             return [
                 self.python,
                 str(root / "gold_autoplayer_v2.py"),
@@ -138,6 +209,7 @@ class AutoplayerSupervisor:
             "restart_delay_seconds": self.restart_delay_seconds,
             "next_restart_at": self.next_restart_at,
             "last_start_error": self.last_start_error,
+            "last_handoff": self.last_handoff,
             "updated_at": time.time(),
         }
         tmp = self.supervisor_status_path.with_suffix(".tmp")
@@ -163,7 +235,15 @@ class AutoplayerSupervisor:
         self.active_engine = None
 
     def reconcile_once(self) -> None:
-        engine = self.read_engine()
+        control = self.read_control()
+        engine = self.engine_for_control(control)
+        handoff_engine, handoff = self.handoff_engine_for_status(engine, control, self.read_runner_status())
+        if handoff is not None:
+            control["engine"] = handoff_engine
+            control["auto_handoff"] = handoff
+            self.write_control(control)
+            self.last_handoff = handoff
+            engine = handoff_engine
         if self.child is not None and self.child.poll() is not None:
             self.last_exit_code = self.child.poll()
             self.child = None

@@ -48,6 +48,10 @@ def write_control(tmp_path, engine):
     (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps(payload))
 
 
+def write_status(tmp_path, payload):
+    (tmp_path / "gold_autoplayer_status.json").write_text(json.dumps(payload))
+
+
 def supervisor(tmp_path, factory=None):
     return AutoplayerSupervisor(
         base_url="http://127.0.0.1:9879",
@@ -111,11 +115,31 @@ def test_supervisor_builds_unified_command_with_shared_data_dir(tmp_path):
     assert str(tmp_path) in command
 
 
+def test_supervisor_builds_adaptive_command_with_v2_runner(tmp_path):
+    service = supervisor(tmp_path)
+
+    command = service.command_for_engine("adaptive")
+
+    assert command[0] == "python-test"
+    assert command[1].endswith("gold_autoplayer_v2.py")
+    assert "--base-url" in command
+    assert "http://127.0.0.1:9879" in command
+    assert "--data-dir" in command
+    assert str(tmp_path) in command
+
+
 def test_supervisor_accepts_unified_engine(tmp_path):
     write_control(tmp_path, "unified")
     service = supervisor(tmp_path)
 
     assert service.read_engine() == "unified"
+
+
+def test_supervisor_accepts_adaptive_engine(tmp_path):
+    write_control(tmp_path, "adaptive")
+    service = supervisor(tmp_path)
+
+    assert service.read_engine() == "adaptive"
 
 
 def test_supervisor_restarts_child_when_engine_changes(tmp_path):
@@ -210,3 +234,60 @@ def test_supervisor_request_stop_writes_stopped_status(tmp_path):
     status = json.loads((tmp_path / "gold_autoplayer_supervisor_status.json").read_text())
     assert status["child_running"] is False
     assert status["active_engine"] is None
+
+
+def test_supervisor_hands_v2_to_v1_when_hard_stuck(tmp_path):
+    factory = FakeFactory()
+    service = supervisor(tmp_path, factory)
+    (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({"engine": "v2", "auto_handoff_enabled": True}))
+    write_status(tmp_path, {"engine": "v2", "navigation": {"recovery_level": 2, "path_source": "safety_circuit_breaker"}})
+
+    service.reconcile_once()
+
+    control = json.loads((tmp_path / "gold_autoplayer_control.json").read_text())
+    supervisor_status = json.loads((tmp_path / "gold_autoplayer_supervisor_status.json").read_text())
+    assert control["engine"] == "v1"
+    assert control["auto_handoff"]["from"] == "v2"
+    assert service.active_engine == "v1"
+    assert supervisor_status["last_handoff"]["reason"] == "v2_hard_stuck"
+
+
+def test_supervisor_hands_v1_to_adaptive_when_v1_stuck(tmp_path):
+    service = supervisor(tmp_path, FakeFactory())
+    (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({"engine": "v1", "auto_handoff_enabled": True}))
+    write_status(tmp_path, {"engine": "v1", "stuck": True})
+
+    service.reconcile_once()
+
+    control = json.loads((tmp_path / "gold_autoplayer_control.json").read_text())
+    assert control["engine"] == "adaptive"
+    assert control["auto_handoff"]["reason"] == "v1_stuck"
+    assert service.active_engine == "adaptive"
+
+
+def test_supervisor_does_not_handoff_red_blue_unified_to_gold_engine(tmp_path):
+    service = supervisor(tmp_path, FakeFactory())
+    (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({"engine": "unified", "auto_handoff_enabled": True}))
+    write_status(tmp_path, {"engine": "unified", "profile": "red_blue", "navigation": {"recovery_level": 2}})
+
+    service.reconcile_once()
+
+    control = json.loads((tmp_path / "gold_autoplayer_control.json").read_text())
+    assert control["engine"] == "unified"
+    assert service.active_engine == "unified"
+
+
+def test_supervisor_handoff_respects_cooldown(tmp_path):
+    service = supervisor(tmp_path, FakeFactory())
+    (tmp_path / "gold_autoplayer_control.json").write_text(json.dumps({
+        "engine": "v2",
+        "auto_handoff_enabled": True,
+        "auto_handoff": {"cooldown_until": 9999999999},
+    }))
+    write_status(tmp_path, {"engine": "v2", "navigation": {"recovery_level": 2}})
+
+    service.reconcile_once()
+
+    control = json.loads((tmp_path / "gold_autoplayer_control.json").read_text())
+    assert control["engine"] == "v2"
+    assert service.active_engine == "v2"

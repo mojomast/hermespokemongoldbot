@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pokemon_agent.gameplay.state_model import snapshot_from_state
-from pokemon_agent.navigation import RouteTarget
+from pokemon_agent.navigation import GOLD_MAP_REGISTRY, RouteTarget, outgoing_transitions, plan_route_to_target
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +146,55 @@ SLOWPOKE_WELL_TARGET = RouteTarget(
 )
 
 
+def _effective_story_tile(state: dict[str, Any], key: tuple[int, int] | None, tile: tuple[int, int] | None) -> tuple[int, int] | None:
+    if key is None or tile is None:
+        return tile
+    map_spec = GOLD_MAP_REGISTRY.get(key)
+    if map_spec is None or map_spec.is_walkable(tile):
+        return tile
+    pos = ((state.get("player") or {}).get("position") or {})
+    raw_x = pos.get("raw_x")
+    raw_y = pos.get("raw_y")
+    raw_tile = (raw_x, raw_y) if isinstance(raw_x, int) and isinstance(raw_y, int) else None
+    if raw_tile is not None and map_spec.is_walkable(raw_tile):
+        return raw_tile
+    return tile
+
+
+def registry_exploration_targets(state: dict[str, Any]) -> tuple[RouteTarget, ...]:
+    """Return reachable transition targets when the story table has no answer."""
+    snapshot = snapshot_from_state(state)
+    key = snapshot.position.map_key
+    tile = _effective_story_tile(state, key, snapshot.position.tile)
+    if key is None or tile is None or GOLD_MAP_REGISTRY.get(key) is None:
+        return ()
+    candidates: list[tuple[int, RouteTarget]] = []
+    for transition in outgoing_transitions(GOLD_MAP_REGISTRY, key):
+        if not transition.source_tiles:
+            continue
+        dest_map = GOLD_MAP_REGISTRY.get(transition.dest_key)
+        if dest_map is None:
+            continue
+        dest_tiles = frozenset(tile for tile in transition.dest_tiles if dest_map.is_walkable(tile))
+        if not dest_tiles:
+            continue
+        name = f"Explore {dest_map.map_const or dest_map.name}"
+        target = RouteTarget(map_key=transition.dest_key, tiles=dest_tiles, name=name)
+        plan = plan_route_to_target(GOLD_MAP_REGISTRY, key, tile, target)
+        if plan is None or plan.next_action is None:
+            continue
+        label = f"{dest_map.map_const or dest_map.name}".upper()
+        score = 0
+        if any(word in label for word in ("ROUTE", "GATE", "FOREST", "CAVE", "WELL", "TOWN", "CITY")):
+            score -= 10
+        if any(word in label for word in ("POKECENTER", "MART", "HOUSE", "GYM")):
+            score += 10
+        score += plan.planned_path_length or 0
+        candidates.append((score, target))
+    candidates.sort(key=lambda row: (row[0], row[1].name))
+    return tuple(target for _, target in candidates)
+
+
 def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
     """Explain the next conservative story/navigation target for early Johto."""
     snapshot = snapshot_from_state(state)
@@ -225,11 +274,17 @@ def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
         if key == (8, 7):
             return StoryDecision("slowpoke_well", "Enter Slowpoke Well", SLOWPOKE_WELL_TARGET, "azalea_to_slowpoke_well_before_hive")
     if has_zephyr:
+        fallback_targets = registry_exploration_targets(state)
+        if fallback_targets:
+            return StoryDecision("registry_exploration", "Explore reachable map transition", fallback_targets[0], "zephyr_badge_observed_registry_exploration", confidence="fallback")
         return StoryDecision("falkner_complete", "Zephyr badge observed", None, "zephyr_badge_observed_objective_complete")
     if key == (10, 5):
         return StoryDecision("falkner", "Challenge Falkner", FALKNER_TARGET, "violet_city_to_falkner_before_zephyr")
     if key == (10, 7):
         return StoryDecision("falkner", "Challenge Falkner", FALKNER_TARGET, "inside_violet_gym_reach_falkner")
+    fallback_targets = registry_exploration_targets(state)
+    if fallback_targets:
+        return StoryDecision("registry_exploration", "Explore reachable map transition", fallback_targets[0], "no_conservative_story_target_registry_transition", confidence="fallback")
     return StoryDecision("no_conservative_target", "No conservative story target", None, "no_conservative_story_target_for_current_map")
 
 

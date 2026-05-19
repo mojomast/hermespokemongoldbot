@@ -43,13 +43,17 @@ from pokemon_agent.gameplay.story import (
 )
 from pokemon_agent.navigation import GOLD_MAP_REGISTRY, RoutePlan, RouteTarget, plan_route_to_target
 from pokemon_agent.navigation.route_planner import find_map_path, transition_between
+from pokemon_agent.autoplayer.learning import LearningFact, LearningMemory, import_gold_v1_teacher_snapshot, read_optional_json
 
 
 DEFAULT_OBJECTIVE = "reach Violet City and win the first gym badge"
 DEFAULT_LOOP_SLEEP_SECONDS = 0.25
 BUTTON_SETTLE_FRAMES = 30
 WALK_HOLD_FRAMES = 48
+SHORT_WALK_HOLD_FRAMES = 24
 WALK_SETTLE_FRAMES = 12
+ADAPTIVE_BUTTON_RECOVERY_SEQUENCE: tuple[str, ...] = ("press_b", "wait_300", "press_a")
+ADAPTIVE_LOOP_RECOVERY_SEQUENCE: tuple[str, ...] = ("press_b", "wait_300", "walk_right", "walk_left", "walk_down", "walk_up")
 ALLOWED_ACTIONS = frozenset({
     "wait_300",
     "wait_600",
@@ -86,16 +90,49 @@ OPPOSITE_DIRECTIONS: dict[str, str] = {
 }
 
 
-def posted_actions_for(action: str) -> list[str]:
+def posted_actions_for(action: str, walk_hold_frames: int | None = None) -> list[str]:
     if action in {"press_a", "press_b"}:
         return [action, f"wait_{BUTTON_SETTLE_FRAMES}"]
     if action.startswith("walk_"):
         direction = action.removeprefix("walk_")
-        return [f"hold_{direction}_{WALK_HOLD_FRAMES}", f"wait_{WALK_SETTLE_FRAMES}"]
+        frames = walk_hold_frames or WALK_HOLD_FRAMES
+        return [f"hold_{direction}_{frames}", f"wait_{WALK_SETTLE_FRAMES}"]
     if action.startswith("press_") and action.removeprefix("press_") in {"up", "down", "left", "right"}:
         direction = action.removeprefix("press_")
         return [f"hold_{direction}_12", "wait_72"]
     return [action]
+
+
+def walk_hold_frames_for_navigation(action: str, navigation: dict[str, Any] | None) -> int | None:
+    """Use shorter holds near doors/warps so one logical step stays one tile."""
+    if not action.startswith("walk_") or not isinstance(navigation, dict):
+        return None
+    path_source = str(navigation.get("path_source") or "")
+    if navigation.get("transition") is not None:
+        return SHORT_WALK_HOLD_FRAMES
+    if "gate" in path_source or "warp" in path_source or "door" in path_source:
+        return SHORT_WALK_HOLD_FRAMES
+    return None
+
+
+def effective_navigation_tile(state: dict[str, Any], key: tuple[int, int] | None, tile: tuple[int, int] | None) -> tuple[tuple[int, int] | None, dict[str, Any]]:
+    """Prefer normalized tile, but fall back to raw RAM coords if maps reject it."""
+    if key is None or tile is None:
+        return tile, {}
+    map_spec = GOLD_MAP_REGISTRY.get(key)
+    if map_spec is None or map_spec.is_walkable(tile):
+        return tile, {}
+    position = ((state.get("player") or {}).get("position") or {})
+    raw_x = position.get("raw_x")
+    raw_y = position.get("raw_y")
+    raw_tile = (raw_x, raw_y) if isinstance(raw_x, int) and isinstance(raw_y, int) else None
+    if raw_tile is not None and map_spec.is_walkable(raw_tile):
+        return raw_tile, {
+            "coordinate_source": "raw_ram_fallback",
+            "normalized_tile": {"x": tile[0], "y": tile[1]},
+            "raw_tile": {"x": raw_tile[0], "y": raw_tile[1]},
+        }
+    return tile, {"coordinate_source": "normalized_unwalkable", "normalized_tile": {"x": tile[0], "y": tile[1]}}
 
 
 def expected_tile_after_walk(tile: tuple[int, int], action: str) -> tuple[int, int] | None:
@@ -791,6 +828,7 @@ class GoldAutoplayerV2:
         self.min_api_backoff_seconds = 1.0
         self.max_api_backoff_seconds = 30.0
         self.recent_failures: deque[dict[str, Any]] = deque(maxlen=10)
+        self.recent_learning_transitions: deque[dict[str, Any]] = deque(maxlen=8)
         self.starter_face_up_attempted_at: tuple[int, int] | None = None
         self.elm_return_face_up_attempted_at: tuple[int, int] | None = None
         self.pokecenter_face_up_attempted_at: tuple[int, int] | None = None
@@ -800,8 +838,13 @@ class GoldAutoplayerV2:
         self.new_game_bootstrap_index = 0
         self.mart_buy_sequence_index = 0
         self.grind_sequence_index = 0
+        self.adaptive_recovery_index = 0
+        self.adaptive_loop_recovery_index = 0
+        self.adaptive_mode = False
         self.loop_sleep_seconds = DEFAULT_LOOP_SLEEP_SECONDS
         self.learning = self.load_learning()
+        self.shared_memory = LearningMemory(self.data_dir / "pokemon_learning_memory.json")
+        self.import_v1_learning_snapshot()
 
     @property
     def control_path(self) -> Path:
@@ -850,10 +893,12 @@ class GoldAutoplayerV2:
         tile_visits = self.learning.get("tile_visits") if isinstance(self.learning, dict) else {}
         return {
             "path": str(self.learning_path),
+            "shared": self.shared_learning_summary(),
             "state_action_keys": len(action_values) if isinstance(action_values, dict) else 0,
             "blocked_edges_learned": len(blocked_edges) if isinstance(blocked_edges, dict) else 0,
             "tiles_visited": len(tile_visits) if isinstance(tile_visits, dict) else 0,
             "turns": self.learning.get("turns", 0) if isinstance(self.learning, dict) else 0,
+            "v1_teacher_import": self.learning.get("v1_teacher_import", {}) if isinstance(self.learning, dict) else {},
         }
 
     def state_key_for_learning(self, state: dict[str, Any] | None) -> str:
@@ -866,6 +911,59 @@ class GoldAutoplayerV2:
             return f"{snapshot.position.map_group}:{snapshot.position.map_number}:{snapshot.position.x}:{snapshot.position.y}:{battle}:{story.objective_key}"
         except Exception:
             return "state:untrusted"
+
+    def shared_learning_summary(self) -> dict[str, Any]:
+        try:
+            payload = self.shared_memory.load()
+        except Exception:
+            payload = {"facts": []}
+        facts = payload.get("facts") if isinstance(payload, dict) else []
+        return {
+            "path": str(self.shared_memory.path),
+            "facts": len(facts) if isinstance(facts, list) else 0,
+            "updated_at": payload.get("updated_at") if isinstance(payload, dict) else None,
+        }
+
+    def record_shared_fact(
+        self,
+        category: str,
+        text: str,
+        confidence: str = "observed",
+        data: dict[str, Any] | None = None,
+        source: str | None = None,
+    ) -> None:
+        try:
+            self.shared_memory.add_fact(LearningFact(
+                category=category,
+                game_id="gold_silver",
+                text=text,
+                confidence=confidence,
+                source=source or ("v2_adaptive" if self.adaptive_mode else "v2"),
+                data=data or {},
+            ))
+        except Exception:
+            return
+
+    def import_v1_learning_snapshot(self) -> None:
+        """Mirror durable V1 world/policy evidence into shared learning memory."""
+        marker = self.learning.get("v1_import_marker") if isinstance(self.learning, dict) else None
+        result = import_gold_v1_teacher_snapshot(
+            self.data_dir,
+            self.shared_memory,
+            previous_marker=marker if isinstance(marker, dict) else None,
+            force=not bool(self.learning.get("v1_teacher_import")),
+        )
+        counts = result.get("counts") if isinstance(result, dict) else None
+        next_marker = result.get("marker") if isinstance(result, dict) else None
+        if not isinstance(next_marker, dict):
+            return
+        self.learning["v1_import_marker"] = next_marker
+        if isinstance(counts, dict) and any(counts.values()):
+            self.learning["v1_teacher_import"] = {**counts, "updated_at": result.get("updated_at", time.time())}
+
+    @staticmethod
+    def _read_optional_json(path: Path) -> dict[str, Any]:
+        return read_optional_json(path)
 
     def reward_for_transition(
         self,
@@ -918,6 +1016,7 @@ class GoldAutoplayerV2:
     ) -> float:
         reward = self.reward_for_transition(before_state, after_state, action, verified, reason, post_result)
         state_key = self.state_key_for_learning(before_state)
+        after_key = self.state_key_for_learning(after_state)
         action_values = self.learning.setdefault("action_values", {})
         state_values = action_values.setdefault(state_key, {})
         stats = state_values.setdefault(action, {"count": 0, "reward_total": 0.0, "mean_reward": 0.0, "last_reason": ""})
@@ -937,6 +1036,7 @@ class GoldAutoplayerV2:
                 pass
         self.learning["last_transition"] = {
             "state_key": state_key,
+            "after_state_key": after_key,
             "action": action,
             "reward": reward,
             "verified": verified,
@@ -944,6 +1044,28 @@ class GoldAutoplayerV2:
             "post_result": post_result,
             "updated_at": time.time(),
         }
+        self.recent_learning_transitions.append({
+            "before": state_key,
+            "after": after_key,
+            "action": action,
+            "verified": verified,
+            "reward": reward,
+            "reason": reason,
+        })
+        if verified and reward > 0:
+            self.record_shared_fact(
+                "PKM:PROGRESS",
+                f"{action} made verified progress from {state_key} to {after_key}",
+                confidence="verified",
+                data={"action": action, "before": state_key, "after": after_key, "reward": reward, "evidence_count": 1},
+            )
+        elif not verified:
+            self.record_shared_fact(
+                "PKM:STUCK",
+                f"{action} failed at {state_key}: {reason}",
+                confidence="observed",
+                data={"action": action, "state_key": state_key, "reason": reason, "post_result": post_result, "evidence_count": 1},
+            )
         return reward
 
     def read_control(self) -> dict[str, Any]:
@@ -1132,6 +1254,7 @@ class GoldAutoplayerV2:
             self.stuck_counter = 0
             self.button_failure_count = 0
             self.recovery_level = 0
+            self.adaptive_recovery_index = 0
             if reason == "map_transition_observed":
                 self.blocked_edges_by_map.clear()
 
@@ -1223,6 +1346,103 @@ class GoldAutoplayerV2:
     def recovery_circuit_open(self) -> bool:
         return self.recovery_level >= 2
 
+
+    def choose_adaptive_button_recovery_action(self) -> str:
+        action = ADAPTIVE_BUTTON_RECOVERY_SEQUENCE[self.adaptive_recovery_index % len(ADAPTIVE_BUTTON_RECOVERY_SEQUENCE)]
+        self.adaptive_recovery_index += 1
+        return action
+
+    def adaptive_oscillation_detected(self) -> bool:
+        if len(self.recent_learning_transitions) < 4:
+            return False
+        rows = list(self.recent_learning_transitions)[-4:]
+        if not all(row.get("verified") for row in rows):
+            return False
+        pairs = [(row.get("before"), row.get("after")) for row in rows]
+        return pairs[0] == pairs[2] and pairs[1] == pairs[3] and pairs[0] == (pairs[1][1], pairs[1][0])
+
+    def choose_adaptive_loop_recovery_action(self, planned_action: str | None = None) -> str:
+        for _ in range(len(ADAPTIVE_LOOP_RECOVERY_SEQUENCE)):
+            action = ADAPTIVE_LOOP_RECOVERY_SEQUENCE[self.adaptive_loop_recovery_index % len(ADAPTIVE_LOOP_RECOVERY_SEQUENCE)]
+            self.adaptive_loop_recovery_index += 1
+            if action != planned_action:
+                return action
+        return "press_b"
+
+    def tile_visit_count(self, key: tuple[int, int], tile: tuple[int, int]) -> int:
+        visits = self.learning.get("tile_visits") if isinstance(self.learning, dict) else {}
+        return int((visits or {}).get(f"{key[0]}:{key[1]}:{tile[0]}:{tile[1]}", 0) or 0)
+
+    def least_visited_neighbor_action(self, key: tuple[int, int], tile: tuple[int, int], *, avoid_action: str | None = None) -> str | None:
+        map_spec = GOLD_MAP_REGISTRY.get(key)
+        if map_spec is None:
+            return None
+        blocked_here = self.blocked_directions_at_tile(key, tile)
+        candidates: list[tuple[int, str]] = []
+        for neighbor, direction in map_spec.neighbors(tile):
+            action = f"walk_{direction}"
+            if direction in blocked_here or action == avoid_action:
+                continue
+            candidates.append((self.tile_visit_count(key, neighbor), action))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda row: (row[0], row[1]))
+        return candidates[0][1]
+
+    def v1_teacher_action_for_tile(self, key: tuple[int, int], tile: tuple[int, int], *, avoid_action: str | None = None) -> str | None:
+        map_spec = GOLD_MAP_REGISTRY.get(key)
+        if map_spec is None:
+            return None
+        coord_key = f"{key[0] * 256 + key[1]}:{tile[1]}:{tile[0]}"
+        blocked_here = self.blocked_directions_at_tile(key, tile)
+        candidates: list[tuple[int, str]] = []
+        try:
+            facts = self.shared_memory.facts_for(category="PKM:MAP", game_id="gold_silver")
+        except Exception:
+            return None
+        valid_actions = {f"walk_{direction}" for _, direction in map_spec.neighbors(tile)}
+        for fact in facts:
+            if fact.get("source") != "v1_teacher":
+                continue
+            data = fact.get("data") if isinstance(fact.get("data"), dict) else {}
+            if data.get("kind") != "v1_open_edge" or data.get("from") != coord_key:
+                continue
+            action = str(data.get("action") or "")
+            direction = action.removeprefix("walk_") if action.startswith("walk_") else ""
+            if action not in valid_actions or action == avoid_action or direction in blocked_here:
+                continue
+            candidates.append((int(data.get("open_count", 0) or 0), action))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda row: (-row[0], row[1]))
+        return candidates[0][1]
+
+    def choose_safe_exploratory_action(
+        self,
+        key: tuple[int, int],
+        tile: tuple[int, int],
+        *,
+        fallback_from: str,
+        route_failure: str | None = None,
+    ) -> tuple[list[str], dict[str, Any]]:
+        action = self.v1_teacher_action_for_tile(key, tile)
+        action_source = "v1_teacher" if action is not None else "least_visited_neighbor"
+        if action is None:
+            action = self.least_visited_neighbor_action(key, tile)
+        if action is None:
+            action = "wait_300"
+            action_source = "wait_fallback"
+        status = {
+            "path_source": "exploratory_fallback",
+            "fallback_from": fallback_from,
+            "route_failure": route_failure,
+            "next_step": action,
+            "fallback_action_source": action_source,
+            "planned_path_length": 1,
+            "return_policy": "v2_planner_after_verified_progress",
+        } | self.blocked_edge_status()
+        return [action], status
+
     def choose_recovery_probe_action(self, key: tuple[int, int], tile: tuple[int, int]) -> str | None:
         map_spec = GOLD_MAP_REGISTRY.get(key)
         blocked_here = self.blocked_directions_at_tile(key, tile)
@@ -1294,15 +1514,6 @@ class GoldAutoplayerV2:
                     "reason": "battle menu RAM unavailable; using observed wild battle main-menu run sequence",
                 }
             return choose_battle_actions(state)
-        if self.button_failure_count >= STUCK_CIRCUIT_BREAKER_THRESHOLD:
-            return [], {
-                "path_source": "safety_button_circuit_breaker",
-                "next_step": None,
-                "planned_path_length": None,
-                "recovery_reason": self.verification_reason,
-                "last_failed_action": self.last_step_action,
-                "button_failures": self.button_failure_count,
-            } | self.blocked_edge_status()
         self.battle_run_sequence_index = 0
         if likely_mart_purchase_screen(state):
             if self.mart_buy_sequence_index >= len(MART_BUY_ONE_SEQUENCE):
@@ -1316,6 +1527,7 @@ class GoldAutoplayerV2:
                 "reason": "buying Poke Balls before grinding/capture",
             } | self.blocked_edge_status()
         if confirmed_dialogue(dialog) or visual_dialogue_active(state):
+            self.button_failure_count = 0
             return ["press_a"], {"path_source": "dialogue", "next_step": "press_a", "planned_path_length": 1}
         if ambiguous_dialogue(dialog):
             return [], {
@@ -1324,6 +1536,27 @@ class GoldAutoplayerV2:
                 "planned_path_length": None,
                 "dialogue_reason": "window_stack_implausible",
             }
+        if self.button_failure_count >= STUCK_CIRCUIT_BREAKER_THRESHOLD:
+            if self.adaptive_mode:
+                action = self.choose_adaptive_button_recovery_action()
+                return [action], {
+                    "path_source": "adaptive_button_recovery",
+                    "next_step": action,
+                    "planned_path_length": 1,
+                    "recovery_reason": self.verification_reason,
+                    "last_failed_action": self.last_step_action,
+                    "button_failures": self.button_failure_count,
+                    "fallback_from": "v2_button_safety_circuit",
+                    "return_policy": "v2_planner_after_verified_progress",
+                } | self.blocked_edge_status()
+            return [], {
+                "path_source": "safety_button_circuit_breaker",
+                "next_step": None,
+                "planned_path_length": None,
+                "recovery_reason": self.verification_reason,
+                "last_failed_action": self.last_step_action,
+                "button_failures": self.button_failure_count,
+            } | self.blocked_edge_status()
         key = snapshot.position.map_key
         tile = snapshot.position.tile
         if key is None or tile is None:
@@ -1346,6 +1579,9 @@ class GoldAutoplayerV2:
                 } | self.blocked_edge_status()
             source = "missing_position"
             return [], {"path_source": source, "next_step": None, "planned_path_length": None} | self.blocked_edge_status()
+        tile, coordinate_status = effective_navigation_tile(state, key, tile)
+        if tile is None:
+            return [], {"path_source": "missing_position", "next_step": None, "planned_path_length": None} | self.blocked_edge_status()
         if likely_elm_phone_call(state):
             return ["press_a"], {
                 "path_source": "elm_phone_call",
@@ -1397,7 +1633,9 @@ class GoldAutoplayerV2:
             } | self.blocked_edge_status()
         target = select_route_target(state)
         if target is None:
-            return [], {"path_source": "no_goal", "next_step": None, "planned_path_length": None} | self.blocked_edge_status()
+            actions, status = self.choose_safe_exploratory_action(key, tile, fallback_from="no_goal")
+            status.update(coordinate_status)
+            return actions, status
         if target == VIOLET_MART_BUY_TARGET and key == VIOLET_MART_BUY_TARGET.map_key and tile in VIOLET_MART_BUY_TARGET.tiles:
             action = "press_a" if self.mart_face_left_attempted_at == tile else "walk_left"
             return [action], {
@@ -1472,11 +1710,28 @@ class GoldAutoplayerV2:
         if plan is not None and plan.next_action is not None:
             status = navigation_status_from_route_plan(plan)
             status.update(self.blocked_edge_status())
+            status.update(coordinate_status)
+            if self.adaptive_mode and self.adaptive_oscillation_detected():
+                recovery_action = self.least_visited_neighbor_action(key, tile, avoid_action=plan.next_action) or self.choose_adaptive_loop_recovery_action(plan.next_action)
+                status["path_source"] = "adaptive_loop_recovery"
+                status["fallback_from"] = "v2_planner_oscillation"
+                status["next_step"] = recovery_action
+                status["planned_path_length"] = 1
+                status["return_policy"] = "v2_planner_after_verified_progress"
+                status["loop_recovery_reason"] = "recent verified transitions oscillated between the same two states"
+                self.record_shared_fact(
+                    "PKM:STUCK",
+                    f"Adaptive mode detected planner oscillation near {self.state_key_for_learning(state)}",
+                    confidence="observed",
+                    data={"planned_action": plan.next_action, "recovery_action": recovery_action, "evidence_count": 1},
+                )
+                return [recovery_action], status
             return [plan.next_action], status
         if plan is not None and plan.next_action is None and key == target.map_key and tile in target.tiles:
             status = navigation_status_from_route_plan(plan)
             status["path_source"] = "arrived_at_story_target"
             status.update(self.blocked_edge_status())
+            status.update(coordinate_status)
             return [], status
         if self.blocked_edges_by_map.get(key):
             if not self.blocked_directions_at_tile(key, tile):
@@ -1488,16 +1743,32 @@ class GoldAutoplayerV2:
                     status = navigation_status_from_route_plan(unblocked_plan)
                     status["path_source"] = "stale_blocked_edges_cleared"
                     status.update(self.blocked_edge_status())
+                    status.update(coordinate_status)
                     return [unblocked_plan.next_action], status
             self.recovery_level = max(self.recovery_level, 2)
-            return [], {
-                "path_source": "blocked_edges_exhausted",
-                "route_failure": "blocked_edges_exhausted",
-                "next_step": None,
-                "planned_path_length": None,
-                "recovery_level": self.recovery_level,
-            } | self.blocked_edge_status()
-        return [], diagnose_route_failure(key, tile, target) | self.blocked_edge_status()
+            if self.adaptive_mode:
+                self.blocked_edges_by_map.pop(key, None)
+                self.recovery_level = 1
+                self.stuck_counter = 0
+                unblocked_plan = plan_route_to_target(GOLD_MAP_REGISTRY, key, tile, target, {})
+                if unblocked_plan is not None and unblocked_plan.next_action is not None:
+                    status = navigation_status_from_route_plan(unblocked_plan)
+                    status["path_source"] = "adaptive_clear_stale_blocked_edges"
+                    status["fallback_from"] = "v2_blocked_edges_exhausted"
+                    status["return_policy"] = "v2_planner_after_verified_progress"
+                    status.update(self.blocked_edge_status())
+                    status.update(coordinate_status)
+                    return [unblocked_plan.next_action], status
+            actions, status = self.choose_safe_exploratory_action(key, tile, fallback_from="blocked_edges_exhausted", route_failure="blocked_edges_exhausted")
+            status["recovery_level"] = self.recovery_level
+            status.update(coordinate_status)
+            return actions, status
+        failure = diagnose_route_failure(key, tile, target)
+        if GOLD_MAP_REGISTRY.get(key) is not None:
+            actions, status = self.choose_safe_exploratory_action(key, tile, fallback_from="no_route", route_failure=str(failure.get("route_failure") or "no_route"))
+            status.update(coordinate_status)
+            return actions, status
+        return [], failure | coordinate_status | self.blocked_edge_status()
 
     def build_status(self, control: dict[str, Any], state: dict[str, Any] | None = None) -> dict[str, Any]:
         enabled = control.get("enabled") is not False
@@ -1525,6 +1796,7 @@ class GoldAutoplayerV2:
         if state:
             snapshot = snapshot_from_state(state)
             story_decision = explain_story_objective(state)
+            self.adaptive_mode = control.get("engine") == "adaptive"
             actions, navigation_update = self.choose_overworld_actions(state)
             if not enabled:
                 actions = []
@@ -1587,7 +1859,7 @@ class GoldAutoplayerV2:
             state_error = "state unavailable"
         ram_health = (gameplay.get("ram_health") if isinstance(gameplay, dict) else {}) or {}
         readiness_blockers: list[str] = []
-        engine_selected = control.get("engine") in {"v2", "unified"}
+        engine_selected = control.get("engine") in {"v2", "unified", "adaptive"}
         if not engine_selected:
             readiness_blockers.append("engine_not_selected")
         if not enabled:
@@ -1623,6 +1895,7 @@ class GoldAutoplayerV2:
                 "engine": "v2",
                 "mode": "active" if engine_selected and enabled else "paused",
                 "selected_engine": control.get("engine"),
+                "adaptive_mode": self.adaptive_mode,
                 "event_log": str(self.event_log_path),
                 "learning_file": str(self.learning_path),
                 "last_error": self.last_api_error or state_error,
@@ -1645,13 +1918,19 @@ class GoldAutoplayerV2:
                 "safe_to_post_actions": safe_to_post_actions,
                 "blockers": readiness_blockers,
             },
+            "mode_policy": {
+                "selected": control.get("engine"),
+                "optimal": "v2_planner",
+                "fallback_active": isinstance(navigation.get("path_source"), str) and navigation.get("path_source", "").startswith("adaptive_"),
+                "return_policy": navigation.get("return_policy") or "v2_planner_after_verified_progress",
+            },
             "learning": self.learning_summary(),
             "updated_at": time.time(),
         }
 
     def run_once(self) -> dict[str, Any]:
         control = self.read_control()
-        if control.get("engine") not in {"v2", "unified"}:
+        if control.get("engine") not in {"v2", "unified", "adaptive"}:
             status = self.build_status({**control, "enabled": False}, None)
             status["selected_engine"] = control.get("engine")
             status["message"] = "V2 idle while another bot engine is selected."
@@ -1696,7 +1975,9 @@ class GoldAutoplayerV2:
                 elif control.get("allow_battle_actions") is not True and (state.get("battle") or {}).get("in_battle"):
                     self.record_action_outcome(action, False, "battle_actions_disabled", "blocked_by_control", state)
                 else:
-                    result = self.post_actions(posted_actions_for(action))
+                    posted_actions = posted_actions_for(action, walk_hold_frames_for_navigation(action, status.get("navigation")))
+                    status["navigation"]["posted_actions"] = posted_actions
+                    result = self.post_actions(posted_actions)
                     if result.get("success") is False:
                         self.record_action_outcome(action, False, "post_actions_unsuccessful", "post_failed", state)
                     else:

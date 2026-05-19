@@ -106,6 +106,13 @@ V2 also writes a transparent transition-learning file named
 tile visits, and blocked-edge evidence. These values are diagnostic/tie-breaker
 material, not an unchecked replacement for the verified route planner.
 
+V1 teacher evidence is imported through
+`pokemon_agent.autoplayer.learning.import_gold_v1_teacher_snapshot()`. The import
+mirrors bounded facts from `gold_world_model.json` and `gold_policy.json` into
+`pokemon_learning_memory.json` with `source: "v1_teacher"`. Imported facts are
+used as evidence for fallback decisions and diagnostics; they do not replace
+verified route planning.
+
 ## Learning Techniques
 
 - Reward shaping: small rewards for verified actions, movement, map transitions,
@@ -139,15 +146,17 @@ material, not an unchecked replacement for the verified route planner.
    current Gold V2 and uses a conservative learning fallback elsewhere. Done in
    this branch.
 3. Add dashboard/API mode controls for V1, V2, unified, and live-action gates.
-   Done in this branch.
+    Done in this branch.
 4. Persist V2 transition rewards/action statistics. Done in this branch.
-5. Extract Gold V2 action verification/recovery into shared modules.
-6. Add `red_blue` profile with Red/Blue state adapter and early Kanto goals.
-7. Make `gold_silver` profile call current Gold V2 planner/policies through the
+5. Import V1 teacher evidence into shared memory and add supervisor stuck handoff.
+   Done in this branch.
+6. Extract Gold V2 action verification/recovery into shared modules.
+7. Add `red_blue` profile with Red/Blue state adapter and early Kanto goals.
+8. Make `gold_silver` profile call current Gold V2 planner/policies through the
    same plugin interface instead of direct delegation.
-8. Add `pokered` map importer or hand-authored early Kanto map registry.
-9. Validate Yellow RAM offsets or add a `yellow` reader/profile.
-10. Replace Gold-specific supervisor naming with neutral game-aware engine names.
+9. Add `pokered` map importer or hand-authored early Kanto map registry.
+10. Validate Yellow RAM offsets or add a `yellow` reader/profile.
+11. Replace Gold-specific supervisor naming with neutral game-aware engine names.
 
 ## Non-Goals
 

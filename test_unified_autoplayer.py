@@ -1,4 +1,6 @@
-from pokemon_agent.autoplayer import LearningFact, LearningMemory, UniversalAutoplayer, profile_for_game_type
+import json
+
+from pokemon_agent.autoplayer import LearningFact, LearningMemory, UniversalAutoplayer, import_gold_v1_teacher_snapshot, profile_for_game_type
 
 
 def test_profile_matrix_marks_gold_more_capable_than_red_blue():
@@ -46,6 +48,23 @@ def test_learning_memory_normalizes_unknown_category(tmp_path):
 
     rows = memory.facts_for(game_id="red_blue")
     assert rows[0]["category"] == "PKM:PROGRESS"
+
+
+def test_shared_v1_teacher_import_writes_gold_facts(tmp_path):
+    (tmp_path / "gold_world_model.json").write_text(json.dumps({
+        "blocked_moves": {"24:7:4": ["walk_left"]},
+        "directed_edges": {"6151:2:4|right": {"action": "walk_right", "from": "6151:2:4", "to": "6151:2:5", "state": "open", "open_count": 3}},
+        "places": {"24:7": {"visits": 1}},
+    }), encoding="utf-8")
+    (tmp_path / "gold_policy.json").write_text(json.dumps({"phase": "overworld", "turn": 9}), encoding="utf-8")
+    memory = LearningMemory(tmp_path / "pokemon_learning_memory.json")
+
+    result = import_gold_v1_teacher_snapshot(tmp_path, memory)
+
+    facts = memory.facts_for(game_id="gold_silver")
+    assert result["counts"]["blocked_moves"] == 1
+    assert {fact["source"] for fact in facts} == {"v1_teacher"}
+    assert {fact["data"].get("kind") for fact in facts} >= {"v1_blocked_moves", "v1_open_edge", "v1_place", "v1_policy_snapshot"}
 
 
 def test_universal_autoplayer_detects_profiles_from_state(tmp_path):

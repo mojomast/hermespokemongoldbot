@@ -28,6 +28,19 @@ This repository is focused on the Gold bot work published at
   policies, and regression tests.
 - Unified learning mode that can delegate Gold/Silver to V2 and use conservative
   fallback learning for other compatible Game Boy Pokemon ROMs.
+- Automatic stuck handoff between V1, V2, and adaptive modes for Gold/Silver, with
+  safeguards so Red/Blue/Yellow stay in their own unified profile mode.
+
+## Documentation
+
+- [Autoplayer Architecture](docs/AUTOPLAYER_ARCHITECTURE.md): services, engine
+  modes, learning files, V1 teacher import, automatic handoff, and operations.
+- [Cross-Game Modes](docs/CROSS_GAME_MODES.md): how Gold/Silver, Red/Blue,
+  Yellow, and generic GB profiles are handled safely.
+- [Unified Autoplayer Spec](UNIFIED_AUTOPLAYER_SPEC.md): long-term shared runner
+  design and fair-play learning rules.
+- [Navigation V2 Spec](NAVIGATION_V2_SPEC.md): Gold/Silver route-planning design.
+- [Gameplay V2 Spec](GAMEPLAY_V2_SPEC.md): Gold/Silver gameplay policy design.
 
 ## Requirements
 
@@ -123,6 +136,29 @@ Dashboard modes:
 - `Unified Learning`: neutral profile runner. For Gold/Silver it reuses V2's
   verified planner; for other ROMs it records learning facts while using a
   conservative fallback policy until their map/story plugins mature.
+- `Adaptive Auto`: Gold/Silver meta-mode that uses V2 pathfinding as the optimal
+  default, temporarily cascades into small recovery policies when V2 hits a
+  safety circuit or detected two-state loop, and returns to V2 after verified
+  progress.
+
+The supervisor also supports automatic hard-stuck handoff:
+
+- Gold/Silver `v2`, `adaptive`, or Gold `unified` hard-stuck -> `v1`.
+- Gold/Silver `v1` stuck/oscillating -> `adaptive`.
+- A cooldown prevents rapid ping-pong between engines.
+- Red/Blue/Yellow/generic unified profiles do not hand off into Gold-specific
+  engines.
+
+Handoff controls are stored in `gold_autoplayer_control.json` and can be updated
+through `POST /autoplayer/control`:
+
+```json
+{
+  "auto_handoff_enabled": true,
+  "auto_handoff_v1_fallback": "adaptive",
+  "auto_handoff_v2_fallback": "v1"
+}
+```
 
 Safety gates are explicit in the dashboard and API:
 
@@ -143,6 +179,9 @@ typically `/home/mojo/.pokemon-agent-gold/`:
 - `gold_autoplayer_v2_learning.json`
 - `pokemon_learning_memory.json`
 
+See [Autoplayer Architecture](docs/AUTOPLAYER_ARCHITECTURE.md) for the full mode
+selection, status, handoff, and learning-file flow.
+
 ## Fair-Play Learning
 
 The bot is designed to learn from the same observations it can legitimately see:
@@ -156,6 +195,13 @@ Current learning techniques are intentionally pragmatic and transparent:
 - V2 persists transition rewards, action statistics, tile visits, and blocked-edge
   evidence in `gold_autoplayer_v2_learning.json`.
 - Unified mode persists categorized `PKM:` facts in `pokemon_learning_memory.json`.
+- V2/adaptive also writes verified progress and stuck facts into
+  `pokemon_learning_memory.json` so other modes can reuse the same evidence.
+- V1 teacher evidence is imported into `pokemon_learning_memory.json` with
+  `source: "v1_teacher"`; V2/adaptive only use those facts in fallback contexts,
+  not as an unchecked override of healthy route planning.
+- Unified mode imports the same teacher facts while keeping Red/Blue/Yellow facts
+  scoped by their own `game_id`.
 - Learned values are used for diagnostics and future tie-breaking; they do not
   override V2's verified planner unless explicitly implemented and tested.
 
@@ -175,7 +221,8 @@ objective/guidance in the dashboard should override learned preferences.
   snapshots.
 - `GET /autoplayer/status`: bot control/status/telemetry payload.
 - `POST /autoplayer/control`: enable/disable the bot, select V1/V2/unified mode,
-  set objective/guidance, and update live-action safety gates.
+  set objective/guidance, update live-action safety gates, and configure automatic
+  handoff.
 - `GET /rtc/debug/perf`: WebRTC media pump diagnostics.
 - `GET /watch/status`, `WS /watch/ws`: viewer count and shared watch chat.
 

@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .learning import LearningFact, LearningMemory
+from .learning import LearningFact, LearningMemory, import_gold_v1_teacher_snapshot
 from .profiles import GameProfile, profile_for_game_type
 
 
@@ -25,6 +25,7 @@ class UniversalAutoplayer:
         self.base_url = base_url.rstrip("/")
         self.data_dir = Path(data_dir)
         self.memory = LearningMemory(self.data_dir / "pokemon_learning_memory.json")
+        self.teacher_import = import_gold_v1_teacher_snapshot(self.data_dir, self.memory, force=True)
         self.turn = 0
 
     @property
@@ -183,6 +184,7 @@ class UniversalAutoplayer:
                 "mode": "active",
                 "event_log": str(self.event_log_path),
                 "learning_file": str(self.memory.path),
+                "teacher_import": self.teacher_import,
                 "dry_run": control.get("dry_run") is not False,
                 "allow_overworld_movement": control.get("allow_overworld_movement") is True,
                 "allow_battle_actions": control.get("allow_battle_actions") is True,

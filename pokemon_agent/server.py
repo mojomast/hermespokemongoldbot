@@ -66,6 +66,9 @@ class AutoplayerControlRequest(BaseModel):
     dry_run: Optional[bool] = None
     allow_overworld_movement: Optional[bool] = None
     allow_battle_actions: Optional[bool] = None
+    auto_handoff_enabled: Optional[bool] = None
+    auto_handoff_v1_fallback: Optional[str] = None
+    auto_handoff_v2_fallback: Optional[str] = None
 
 
 class TunnelStartRequest(BaseModel):
@@ -759,6 +762,9 @@ def _default_autoplayer_control() -> dict:
         "dry_run": True,
         "allow_overworld_movement": False,
         "allow_battle_actions": False,
+        "auto_handoff_enabled": True,
+        "auto_handoff_v1_fallback": "adaptive",
+        "auto_handoff_v2_fallback": "v1",
     }
 
 
@@ -898,7 +904,7 @@ def _v2_readiness(control: dict, status: dict, recent_v2: list[dict], supervisor
     runner = status.get("runner") if status_is_v2 and isinstance(status.get("runner"), dict) else {}
     readiness = status.get("readiness") if status_is_v2 and isinstance(status.get("readiness"), dict) else {}
     blockers: list[str] = []
-    if control.get("engine") not in {"v2", "unified"}:
+    if control.get("engine") not in {"v2", "unified", "adaptive"}:
         blockers.append("engine_not_selected")
     if not status_is_v2:
         blockers.append("v2_status_unavailable")
@@ -910,8 +916,8 @@ def _v2_readiness(control: dict, status: dict, recent_v2: list[dict], supervisor
         blockers.append("overworld_movement_disabled")
     if control.get("allow_battle_actions") is not True:
         blockers.append("battle_actions_disabled")
-    if supervisor and supervisor.get("active_engine") not in {"v2", "unified"}:
-        blockers.append("supervisor_not_running_v2_or_unified")
+    if supervisor and supervisor.get("active_engine") not in {"v2", "unified", "adaptive"}:
+        blockers.append("supervisor_not_running_v2_unified_or_adaptive")
     if supervisor and not supervisor_health.get("healthy"):
         blockers.append("supervisor_unhealthy")
     return {
@@ -1627,15 +1633,15 @@ def _build_autoplayer_status_payload() -> dict:
     if isinstance(status, dict):
         status.setdefault("engine", control.get("engine", "v1"))
     active_engine = control.get("engine", "v1")
-    if active_engine not in {"v1", "v2", "unified"} and isinstance(status, dict):
+    if active_engine not in {"v1", "v2", "unified", "adaptive"} and isinstance(status, dict):
         active_engine = status.get("engine") or status.get("selected_engine") or "v1"
-    active_log_path = _autoplayer_v2_log_path() if active_engine == "v2" else (_autoplayer_unified_log_path() if active_engine == "unified" else _autoplayer_log_path())
+    active_log_path = _autoplayer_v2_log_path() if active_engine in {"v2", "adaptive"} else (_autoplayer_unified_log_path() if active_engine == "unified" else _autoplayer_log_path())
     recent_v1 = _tail_jsonl(_autoplayer_log_path(), limit=30)
     recent_v2 = _tail_jsonl(_autoplayer_v2_log_path(), limit=30)
     recent_unified = _tail_jsonl(_autoplayer_unified_log_path(), limit=30)
-    recent = recent_v2 if active_engine == "v2" else (recent_unified if active_engine == "unified" else recent_v1)
-    if isinstance(status, dict) and control.get("engine") in {"v2", "unified"} and status.get("engine") != "v2":
-        status.setdefault("visibility_warning", "V2/unified selected but latest status is not from V2 runner")
+    recent = recent_v2 if active_engine in {"v2", "adaptive"} else (recent_unified if active_engine == "unified" else recent_v1)
+    if isinstance(status, dict) and control.get("engine") in {"v2", "unified", "adaptive"} and status.get("engine") != "v2":
+        status.setdefault("visibility_warning", "V2/unified/adaptive selected but latest status is not from V2 runner")
     supervisor = _read_json_file(_autoplayer_supervisor_status_path(), {})
     supervisor_health = _supervisor_health(supervisor if isinstance(supervisor, dict) else {})
     v2_readiness = _v2_readiness(control, status if isinstance(status, dict) else {}, recent_v2, supervisor if isinstance(supervisor, dict) else {}, supervisor_health)
@@ -1649,6 +1655,9 @@ def _build_autoplayer_status_payload() -> dict:
             warnings.append("Supervisor child is not running")
         if supervisor.get("last_start_error"):
             warnings.append("Supervisor child failed to start")
+        if supervisor.get("last_handoff"):
+            handoff = supervisor.get("last_handoff") if isinstance(supervisor.get("last_handoff"), dict) else {}
+            warnings.append(f"Auto handoff {handoff.get('from')} -> {handoff.get('to')}: {handoff.get('reason')}")
     memory = status.get("memory")
     if not memory:
         world = _read_json_file(_autoplayer_world_path(), {})
@@ -1693,8 +1702,11 @@ async def autoplayer_control(req: AutoplayerControlRequest):
     control = _default_autoplayer_control()
     control.update(_read_json_file(path, {}))
     updates = req.dict(exclude_none=True)
-    if "engine" in updates and updates["engine"] not in {"v1", "v2", "unified"}:
-        raise HTTPException(status_code=400, detail="engine must be v1, v2, or unified")
+    if "engine" in updates and updates["engine"] not in {"v1", "v2", "unified", "adaptive"}:
+        raise HTTPException(status_code=400, detail="engine must be v1, v2, unified, or adaptive")
+    for key in ("auto_handoff_v1_fallback", "auto_handoff_v2_fallback"):
+        if key in updates and updates[key] not in {"v1", "v2", "unified", "adaptive"}:
+            raise HTTPException(status_code=400, detail=f"{key} must be v1, v2, unified, or adaptive")
     if "movement_bias" in updates and updates["movement_bias"] not in {"west_north", "north_east", "balanced"}:
         raise HTTPException(status_code=400, detail="movement_bias must be west_north, north_east, or balanced")
     if "dialogue_speed" in updates and updates["dialogue_speed"] not in {"fast", "normal"}:

@@ -23,6 +23,7 @@ from gold_autoplayer_v2 import (
     choose_healing_item_actions,
     choose_battle_actions,
     posted_actions_for,
+    walk_hold_frames_for_navigation,
     select_route_target,
     verify_single_action,
 )
@@ -316,6 +317,153 @@ def test_v2_repeated_button_failures_open_safety_circuit():
     assert nav["button_failures"] == 3
 
 
+def test_adaptive_button_failures_cascade_to_recovery_action():
+    player = GoldAutoplayerV2()
+    player.adaptive_mode = True
+    state = make_state(24, 3, 50, 8, party=[{"slot": 1, "species_id": 158, "level": 5, "hp": 20, "max_hp": 20}])
+    player.button_failure_count = 3
+    player.last_step_action = "press_a"
+    player.verification_reason = "press_a_no_progress"
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions == ["press_b"]
+    assert nav["path_source"] == "adaptive_button_recovery"
+    assert nav["fallback_from"] == "v2_button_safety_circuit"
+
+
+def test_adaptive_detects_verified_two_state_oscillation(tmp_path):
+    player = GoldAutoplayerV2(data_dir=tmp_path)
+    player.recent_learning_transitions.extend([
+        {"before": "a", "after": "b", "verified": True},
+        {"before": "b", "after": "a", "verified": True},
+        {"before": "a", "after": "b", "verified": True},
+        {"before": "b", "after": "a", "verified": True},
+    ])
+
+    assert player.adaptive_oscillation_detected() is True
+    assert player.choose_adaptive_loop_recovery_action("press_b") == "wait_300"
+
+
+def test_v2_records_shared_learning_facts(tmp_path):
+    player = GoldAutoplayerV2(data_dir=tmp_path)
+    before = make_state(24, 7, 4, 2)
+    after = make_state(24, 7, 5, 2)
+
+    player.record_learning_transition("walk_right", True, "walked_expected_tile", "ok", before, after)
+
+    shared = json.loads((tmp_path / "pokemon_learning_memory.json").read_text())
+    assert shared["facts"]
+    assert shared["facts"][-1]["category"] == "PKM:PROGRESS"
+    assert shared["facts"][-1]["source"] == "v2"
+
+
+def test_v2_imports_v1_learning_as_teacher_facts(tmp_path):
+    (tmp_path / "gold_world_model.json").write_text(json.dumps({
+        "blocked_moves": {"24:7:4": ["walk_left", "hold_up_60", "walk_up"]},
+        "directed_edges": {
+            "6151:2:4|right": {"action": "walk_right", "direction": "right", "from": "6151:2:4", "to": "6151:2:5", "state": "open", "open_count": 5, "blocked_count": 0},
+        },
+        "places": {"24:7": {"visits": 3, "important": True, "notes": ["starter room"]}},
+    }), encoding="utf-8")
+    (tmp_path / "gold_policy.json").write_text(json.dumps({"phase": "dialogue", "turn": 42}), encoding="utf-8")
+
+    player = GoldAutoplayerV2(data_dir=tmp_path)
+
+    shared = json.loads((tmp_path / "pokemon_learning_memory.json").read_text(encoding="utf-8"))
+    sources = {fact["source"] for fact in shared["facts"]}
+    kinds = {fact["data"].get("kind") for fact in shared["facts"]}
+    assert sources == {"v1_teacher"}
+    assert {"v1_blocked_moves", "v1_open_edge", "v1_place", "v1_policy_snapshot"}.issubset(kinds)
+    assert player.learning_summary()["v1_teacher_import"]["blocked_moves"] == 1
+
+
+def test_v2_exploratory_fallback_prefers_v1_teacher_open_edge(tmp_path):
+    (tmp_path / "gold_world_model.json").write_text(json.dumps({
+        "directed_edges": {
+            "6151:2:4|right": {"action": "walk_right", "direction": "right", "from": "6151:2:4", "to": "6151:2:5", "state": "open", "open_count": 7, "blocked_count": 0},
+            "6151:2:4|down": {"action": "walk_down", "direction": "down", "from": "6151:2:4", "to": "6151:3:4", "state": "open", "open_count": 2, "blocked_count": 0},
+        }
+    }), encoding="utf-8")
+    player = GoldAutoplayerV2(data_dir=tmp_path)
+
+    actions, status = player.choose_safe_exploratory_action((24, 7), (4, 2), fallback_from="no_route")
+
+    assert actions == ["walk_right"]
+    assert status["fallback_action_source"] == "v1_teacher"
+
+
+def test_v2_falls_back_to_raw_tile_when_normalized_tile_is_blocked():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        24,
+        5,
+        2,
+        5,
+        position_extra={"raw_x": 5, "raw_y": 2, "actual_x": 2, "actual_y": 5},
+    )
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions
+    assert nav["coordinate_source"] == "raw_ram_fallback"
+    assert nav["raw_tile"] == {"x": 5, "y": 2}
+    assert nav["path_source"] != "no_route"
+
+
+def test_v2_no_route_uses_exploratory_fallback_on_known_map():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        24,
+        5,
+        2,
+        5,
+        position_extra={"raw_x": 2, "raw_y": 5, "actual_x": 2, "actual_y": 5},
+    )
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions
+    assert nav["path_source"] == "exploratory_fallback"
+    assert nav["fallback_from"] == "no_route"
+
+
+def test_v2_no_goal_uses_exploratory_fallback_on_known_map():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        3,
+        40,
+        17,
+        14,
+        party=[{"slot": 1, "species_id": 158, "level": 14, "hp": 30, "max_hp": 30}],
+    )
+    state["player"]["badges"] = ["Zephyr"]
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions
+    assert nav["path_source"] != "no_goal"
+
+
+def test_v2_visual_dialogue_overrides_button_safety_circuit():
+    player = GoldAutoplayerV2()
+    state = make_state(
+        24,
+        5,
+        5,
+        3,
+        party=[{"slot": 1, "species_id": 158, "level": 5, "hp": 20, "max_hp": 20}],
+        visual={"screen_class": "menu_or_text", "visual_textbox_active": True, "bright_lower": 0.8, "dark_lower": 0.18},
+    )
+    player.button_failure_count = 3
+
+    actions, nav = player.choose_overworld_actions(state)
+
+    assert actions == ["press_a"]
+    assert nav["path_source"] == "dialogue"
+    assert player.button_failure_count == 0
+
+
 def test_v2_unknown_start_map_reports_route_failure():
     player = GoldAutoplayerV2()
 
@@ -331,8 +479,8 @@ def test_v2_unwalkable_start_reports_route_failure():
 
     actions, nav = player.choose_overworld_actions(make_state(24, 7, 99, 99))
 
-    assert actions == []
-    assert nav["path_source"] == "no_route"
+    assert actions == ["wait_300"]
+    assert nav["path_source"] == "exploratory_fallback"
     assert nav["route_failure"] == "start_not_walkable"
 
 
@@ -2158,7 +2306,15 @@ def test_verify_unknown_action_is_not_verified():
 def test_posted_actions_adds_wait_after_button_press():
     assert posted_actions_for("press_a") == ["press_a", "wait_30"]
     assert posted_actions_for("walk_right") == ["hold_right_48", "wait_12"]
+    assert posted_actions_for("walk_right", 24) == ["hold_right_24", "wait_12"]
     assert posted_actions_for("press_down") == ["hold_down_12", "wait_72"]
+
+
+def test_doorway_navigation_uses_short_walk_hold():
+    assert walk_hold_frames_for_navigation("walk_left", {"transition": {"kind": "warp"}}) == 24
+    assert walk_hold_frames_for_navigation("walk_left", {"path_source": "route31_gate_live_entry", "planned_path_length": 2}) == 24
+    assert walk_hold_frames_for_navigation("walk_left", {"path_source": "cross_map_static_registry", "planned_path_length": 2}) is None
+    assert walk_hold_frames_for_navigation("walk_left", {"path_source": "same_map_static_registry", "planned_path_length": 5}) is None
 
 
 def test_recovery_state_increments_after_failed_walk_verification():
@@ -2375,7 +2531,7 @@ def test_run_once_posts_action_records_verification_and_logs_event(tmp_path):
 
     status = bot.run_once()
 
-    assert bot.posted_actions == [["hold_right_48", "wait_12"]]
+    assert bot.posted_actions == [["hold_right_24", "wait_12"]]
     assert status["navigation"]["last_step_verified"] is True
     assert status["navigation"]["verification_reason"] == "walked_expected_tile"
     rows = [json.loads(line) for line in bot.event_log_path.read_text().splitlines()]
@@ -2426,7 +2582,7 @@ def test_run_once_post_failure_does_not_mark_verified(tmp_path):
 
     status = bot.run_once()
 
-    assert bot.posted_actions == [["hold_right_48", "wait_12"]]
+    assert bot.posted_actions == [["hold_right_24", "wait_12"]]
     assert status["navigation"]["last_step_result"] == "post_failed"
     assert status["navigation"]["last_step_verified"] is False
     assert status["navigation"]["verification_reason"] == "post_actions_unsuccessful"
