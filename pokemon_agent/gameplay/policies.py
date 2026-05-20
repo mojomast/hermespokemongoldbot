@@ -9,6 +9,9 @@ from .gold_data import BALL_ITEM_IDS, CATCH_PRIORITY_SPECIES, DANGEROUS_ENEMY_MO
 from .state_model import GameSnapshot
 
 
+EARLY_ROSTER_TARGET_SIZE = 4
+
+
 CatchAction = Literal["throw_ball", "weaken", "run", "fight", "wait"]
 
 
@@ -57,10 +60,14 @@ def choose_catch_action(state: GameSnapshot, owned_species: set[str] | None = No
         return CatchDecision("run", "party is full and species is not high priority", battle.enemy_species)
     if battle.enemy_species in owned_species:
         return CatchDecision("run", "species already owned", battle.enemy_species)
+    if inventory.balls <= 1 and len(state.party) >= 3 and battle.enemy_species not in CATCH_PRIORITY_SPECIES and not _has_hm_role(battle.enemy_species):
+        return CatchDecision("run", "preserve last ball for priority species", battle.enemy_species)
 
     lead = state.lead
     if lead and lead.hp_ratio is not None and lead.hp_ratio < 0.25:
         return CatchDecision("run", "lead HP too low for safe catching", battle.enemy_species)
+    if len(state.party) < EARLY_ROSTER_TARGET_SIZE and battle.enemy_level is not None and battle.enemy_level <= 4:
+        return CatchDecision("throw_ball", "early roster slot open; throw immediately at low-level route encounter", battle.enemy_species)
     if battle.enemy_species in CATCH_PRIORITY_SPECIES or _has_hm_role(battle.enemy_species):
         if battle.enemy_has_status:
             return CatchDecision("throw_ball", "target has status condition", battle.enemy_species)
@@ -70,15 +77,17 @@ def choose_catch_action(state: GameSnapshot, owned_species: set[str] | None = No
             if battle.enemy_hp_ratio <= 0.5:
                 return CatchDecision("throw_ball", "target HP is reduced", battle.enemy_species)
             return CatchDecision("weaken", "target HP is high", battle.enemy_species)
-        return CatchDecision("throw_ball", "species is useful for progression", battle.enemy_species)
+        return CatchDecision("throw_ball", "useful species HP unknown; avoid KO while catching", battle.enemy_species)
     if battle.enemy_has_status or any(move in DANGEROUS_ENEMY_MOVE_IDS for move in battle.enemy_moves):
         return CatchDecision("throw_ball", "early roster target is safer to catch than weaken", battle.enemy_species)
-    if len(state.party) < 3:
+    if len(state.party) < EARLY_ROSTER_TARGET_SIZE:
+        if battle.enemy_level is not None and battle.enemy_level <= 4:
+            return CatchDecision("throw_ball", "early roster slot open; throw immediately at low-level route encounter", battle.enemy_species)
         if battle.enemy_hp_ratio is not None:
             if battle.enemy_hp_ratio <= 0.5:
                 return CatchDecision("throw_ball", "early roster slot open and target HP is reduced", battle.enemy_species)
             return CatchDecision("weaken", "early roster slot open; weaken new species before catching", battle.enemy_species)
-        return CatchDecision("throw_ball", "early roster slot open for new species", battle.enemy_species)
+        return CatchDecision("throw_ball", "early roster slot open; HP unknown so avoid accidental KO", battle.enemy_species)
     return CatchDecision("run", "species is not a current catch target", battle.enemy_species)
 
 

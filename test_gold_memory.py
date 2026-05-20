@@ -290,3 +290,41 @@ def test_gold_bag_skips_empty_items_but_keeps_count_diagnostics():
     assert flags["bag_count_trusted"] is True
     assert flags["bag_terminator"] == 0xFF
     assert flags["bag_terminator_present"] is True
+
+
+def test_gold_ball_pocket_uses_pokegold_w_num_balls_address():
+    bag = reader({
+        0xD5B7: 1,
+        0xD5B8: 0x12,
+        0xD5B9: 1,
+        0xD5BA: 0xFF,
+        0xD5FC: 1,
+        0xD5FD: 0x05,
+        0xD5FE: 4,
+        0xD5FF: 0xFF,
+        # Old bug: these bytes are in/near key-item data and must not define balls.
+        0xD5F7: 0,
+    }).read_bag()
+
+    assert bag == [
+        {"slot": 1, "pocket": "items", "item_id": 0x12, "item": "Potion", "quantity": 1, "trusted": True},
+        {"slot": 1, "pocket": "balls", "item_id": 0x05, "item": "Poke Ball", "quantity": 4, "trusted": True},
+    ]
+
+
+def test_gold_flags_expose_ball_pocket_diagnostics():
+    flags = reader({0xD5FC: 2, 0xD5FD: 0x05, 0xD5FE: 4, 0xD5FF: 0x04, 0xD600: 1, 0xD601: 0xFF}).read_flags()
+
+    assert flags["balls_count"] == 2
+    assert flags["balls_count_raw"] == 2
+    assert flags["balls_count_trusted"] is True
+    assert flags["balls_terminator"] == 0xFF
+    assert flags["balls_terminator_present"] is True
+
+
+def test_gold_money_exposes_raw_bcd_and_trust():
+    player = reader({0xD573: 0x00, 0xD574: 0x18, 0xD575: 0x80}).read_player()
+
+    assert player["money"] == 1880
+    assert player["money_raw_bcd"] == [0x00, 0x18, 0x80]
+    assert player["money_trusted"] is True

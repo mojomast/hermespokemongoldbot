@@ -43,7 +43,25 @@ runners never need to kill or replace themselves.
 | `unified` | `pokemon_autoplayer.py` | Cross-game profile runner; Gold/Silver delegates to V2, Gen 1 uses safe fallback learning |
 
 `adaptive` is not a separate algorithm from V2. It is V2 with extra recovery
-gates enabled by `control.engine == "adaptive"`.
+gates enabled by `control.engine == "adaptive"`. Those gates are intentionally
+small and auditable: blocked-edge probes, adaptive button recovery when button
+verification fails, two-state oscillation recovery, and return-to-V2-after-
+verified-progress behavior.
+
+V2/adaptive also has resume logic for non-navigation stalls:
+
+- `button_failures >= 3` and `recovery_level >= 2` open the local recovery
+  circuit.
+- Battle fallback records semantic progress, not just posted buttons. If repeated
+  battle fallback buttons do not change battle/HP/menu state, it switches to a
+  bounded battle resume sequence before returning to normal battle policy.
+- Missing-menu fight fallback is PP-aware: if the first move has 0 PP, it selects
+  another available move instead of repeating a no-PP action forever.
+- Ambiguous text/menu states no longer hard-idle forever; they use a bounded
+  `wait_300`, `press_b`, `press_a` probe while reporting
+  `path_source: ambiguous_dialogue_recovery`.
+- Hard local stops are still visible to the supervisor as safety/button circuit
+  sources, allowing mode handoff when local recovery cannot resume progress.
 
 ## Automatic Handoff
 
@@ -105,6 +123,19 @@ recorded when the bot discovers it is not ready for a goal, for example no balls
 low money, low HP, or a level floor before Falkner. Outcome/failure facts record
 verified rewards, unverified actions, and control/readiness blockers.
 
+Starter selection state is persisted inside `gold_autoplayer_v2_learning.json`:
+
+- `starter_selection.active_choice` / `active_choice_index`: current fresh-run
+  starter choice until a starter is obtained.
+- `starter_selection.last_choice` / `last_choice_index`: last completed starter
+  choice, used to rotate `cyndaquil -> totodile -> chikorita`.
+- `starter_selection.active_nickname` / `active_nickname_index`: current nickname
+  sequence until the naming screen exits.
+- `starter_selection.last_nickname` / `last_nickname_index`: last completed safe
+  nickname, used to rotate `A`, `AA`, `AAA`, `AAAA`, `AAAAA`.
+
+Finalized starter selections are also recorded as `PKM:TEAM` shared facts.
+
 ## Teacher Learning
 
 V1 is treated as a teacher, not as an unchecked action oracle. Its durable world
@@ -136,6 +167,11 @@ Live action gates remain explicit:
 - `allow_overworld_movement`: allow walking outside battle.
 - `allow_battle_actions`: allow battle/menu actions while in battle.
 
+The dashboard diagnostic agent is an operator layer above these gates. It can run
+read-only diagnosis, a bounded self-critique `agent loop`, or reversible live
+troubleshooting, but runtime mutations still flow through typed approval cards.
+See `docs/DIAGNOSTIC_AGENT.md` for the diagnostic loop contract and safety rules.
+
 Fair-play constraints:
 
 - Learn from `/state`, `/screenshot`, `/action` responses, and verified
@@ -151,8 +187,19 @@ Useful commands:
 ```bash
 curl http://127.0.0.1:9879/autoplayer/status
 systemctl --user status pokemon-gold-server.service pokemon-gold-autoplayer.service --no-pager
+systemctl --user restart pokemon-gold-autoplayer.service
+systemctl --user restart pokemon-gold-server.service
 python3 -m pytest -q test_gold_autoplayer_v2.py test_autoplayer_service.py test_unified_autoplayer.py
 ```
+
+Use the actual server port from your launch command. The local helper script
+defaults to `9876`, while the current user service may run on `9879`.
+Autoplayer-only code changes usually need only
+`systemctl --user restart pokemon-gold-autoplayer.service`; server, dashboard,
+WebRTC, ROM, or tunnel changes need `pokemon-gold-server.service` restarted.
+After selecting a different ROM through onboarding/dashboard controls, restart
+the server with the generated launch command so the emulator, save directory, and
+learning profile all switch together.
 
 Key status fields:
 
@@ -171,3 +218,8 @@ Key status fields:
 - `status.decision_trace`: observe -> assess -> choose -> plan -> learn trace for
   the dashboard inspector.
 - `status.failure_memory`: recent failures plus shared learning category counts.
+
+The dashboard AI Decision Inspector renders these same fields directly below the
+video: mode switch status, supervisor health, current intent, resource/readiness
+gates, policy candidates, learning memory, and the observe -> assess -> choose ->
+plan -> learn decision trace.

@@ -74,11 +74,21 @@ Initial objective skeleton lives in `pokemon_agent/gameplay/story.py`.
 
 ## Current Implementation
 
-Added as foundations:
+Implemented foundations and active policies:
 
 - `pokemon_agent/gameplay/state_model.py`: normalized `GameSnapshot` from `/state`.
 - `pokemon_agent/gameplay/gold_data.py`: partial trusted species/item/HM-role tables.
 - `pokemon_agent/gameplay/policies.py`: inventory summary, catch policy, roster roles.
-- `pokemon_agent/gameplay/story.py`: full-game objective skeleton.
+- `pokemon_agent/gameplay/story.py`: story objective planner, early-game resource
+  gates, Falkner readiness, registry exploration fallback, and starter targets.
+- `gold_autoplayer_v2.py`: V2/adaptive runner with verified actions,
+  short-hold movement pacing, live Elm Lab starter macro, rotating starter choice,
+  safe nickname rotation, battle fallback, catch/run/heal policies, blocked-edge
+  recovery, battle no-progress resume probes, and ambiguous dialogue resume probes.
+- `gold_autoplayer_service.py`: supervisor process selection and automatic
+  V1/V2/adaptive handoff when local recovery cannot resume progress.
 
-Next implementation step: wire `gold_autoplayer_v2.py` to poll `/state`, build a `GameSnapshot`, select phase/controller, and write live V2 status without issuing movement until `StepExecutor` is ready.
+Current next implementation steps are to extract the working V2/adaptive recovery
+controller into smaller reusable modules, keep adding route/story coverage beyond
+the early game, and validate additional game profiles before enabling non-Gold
+planners.

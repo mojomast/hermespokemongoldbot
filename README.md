@@ -46,7 +46,9 @@ This repository is focused on the Gold bot work published at
 ## Requirements
 
 - Python 3.10+
-- PyBoy-compatible Pokemon Gold `.gbc` ROM that you legally own
+- PyBoy-compatible Pokemon ROM that you legally own. Gold/Silver `.gbc` ROMs are
+  the strongest autoplayer targets today; uploaded `.gb`, `.gbc`, and `.gba`
+  files are accepted by onboarding and are profile-scoped.
 - Project dependencies from `pyproject.toml`
 
 ## Setup
@@ -71,6 +73,13 @@ pokemon-agent onboard --port 9876 --data-dir /home/mojo/.pokemon-agent-gold
 Then open `http://localhost:9876/dashboard/onboarding.html`. The page stores
 uploaded `.gb`, `.gbc`, and `.gba` files under the configured data directory and
 prints the exact launch command for the selected ROM.
+
+ROM switching is restart-based by design. Uploaded ROM metadata is available via
+`GET /roms`; uploads use `POST /roms/upload`; selection uses `POST /roms/select`.
+Each selected ROM gets an isolated profile data directory under
+`games/<game>-<romhash>` so saves, runs, and learning memory do not bleed between
+games. After selecting a ROM, restart the server with the launch command shown by
+the dashboard/onboarding page.
 
 ```bash
 ./start_pokemon_gold.sh /path/to/pokemon_gold.gbc
@@ -117,6 +126,9 @@ The tunnel helper uses `localhost.run`, writes its log to
 `/tmp/pokemon-localhost-run.log` by default, and prints a temporary `*.lhr.life`
 URL. Share the URL with `/dashboard/watch.html` appended. Do not share
 `/dashboard/` publicly unless you intentionally want to expose controls.
+The dashboard can also start/reuse the tunnel through `POST /tunnel/start` and
+poll it with `GET /tunnel/status`. Override helper paths/logs with
+`POKEMON_TUNNEL_SCRIPT`, `POKEMON_TUNNEL_LOG`, and `POKEMON_TUNNEL_LAUNCH_LOG`.
 
 ## Autoplayer
 
@@ -141,6 +153,27 @@ Dashboard modes:
   default, temporarily cascades into small recovery policies when V2 hits a
   safety circuit or detected two-state loop, and returns to V2 after verified
   progress.
+
+Current V2/adaptive resume behavior is deliberately bounded and explainable:
+
+- Overworld movement verifies each short action and records blocked edges.
+- Adaptive recovery probes around blocked/oscillating navigation and returns to
+  V2 after verified progress.
+- Battle fallback detects repeated no-semantic-progress loops and switches to a
+  small battle resume sequence before returning to normal battle policy.
+- Missing-menu fight fallback avoids selecting a 0-PP first move forever and uses
+  another available move when PP data is trusted.
+- Ambiguous text/menu states use a bounded `wait_300`, `press_b`, `press_a`
+  resume probe instead of idling forever.
+- The supervisor can still hand off between V1 and adaptive if local recovery
+  cannot resume progress.
+
+Starter selection is also stateful across fresh runs. V2/adaptive use a live Elm
+Lab macro instead of brittle raw-coordinate routing, rotate starters in order
+`cyndaquil -> totodile -> chikorita`, and persist that state in
+`gold_autoplayer_v2_learning.json:starter_selection`. Starter nicknames rotate
+through safe keyboard sequences: `A`, `AA`, `AAA`, `AAAA`, and `AAAAA`; the bot
+stops after the planned sequence if the keyboard still appears active.
 
 The supervisor also supports automatic hard-stuck handoff:
 
@@ -235,6 +268,10 @@ objective/guidance in the dashboard should override learned preferences.
   handoff.
 - `GET /rtc/debug/perf`: WebRTC media pump diagnostics.
 - `GET /watch/status`, `WS /watch/ws`: viewer count and shared watch chat.
+- `GET /roms`, `POST /roms/upload`, `POST /roms/select`: ROM onboarding,
+  metadata, selected profile, and restart launch command.
+- `GET /tunnel/status`, `POST /tunnel/start`: temporary localhost.run sharing for
+  read-only watch/upload links.
 
 ## Tests
 
@@ -255,6 +292,8 @@ python -m py_compile gold_autoplayer_v2.py pokemon_agent/server.py
 This repository does not include, download, distribute, or provide Pokemon ROMs,
 BIOS files, save files containing proprietary game data, or other copyrighted
 game assets. You must supply your own legally obtained Pokemon Gold ROM.
+Gold/Silver are the primary autonomy targets; other uploaded Pokemon ROMs remain
+profile-scoped and conservative unless their planner support is explicitly added.
 
 Pokemon, Pokemon Gold, Game Boy, and related names/assets are owned by Nintendo,
 Game Freak, Creatures, and/or The Pokemon Company. This project is an independent

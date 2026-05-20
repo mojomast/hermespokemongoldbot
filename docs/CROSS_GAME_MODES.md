@@ -7,7 +7,7 @@ learning files are designed for Red, Blue, Yellow, Gold, and Silver.
 
 | Game | Profile | Current behavior | Gold-specific planner? |
 | --- | --- | --- | --- |
-| Gold/Silver | `gold_silver` | V2/adaptive planner, V1 teacher import, unified delegation to V2 | Yes |
+| Gold/Silver | `gold_silver` | V2/adaptive planner, starter rotation/nicknames, V1 teacher import, unified delegation to V2 | Yes |
 | Red/Blue | `red_blue` | Unified fallback learning with structured-state detection | No |
 | Yellow | `yellow` | Unified fallback learning, RAM offsets not fully validated | No |
 | Unknown GB/GBC | `generic_gb` | Unified visual/dialog/battle fallback learning | No |
@@ -29,12 +29,24 @@ Gold/Silver has the most mature stack:
 - Static map registry and route planner.
 - Story objective selector.
 - V2 verified action loop.
-- Adaptive recovery and stuck handoff.
+- Adaptive recovery, battle/dialogue resume probes, and stuck handoff.
+- Live Elm Lab starter macro with persisted starter rotation and safe nickname
+  rotation.
 - V1 teacher import from `gold_world_model.json` and `gold_policy.json`.
 
 Recommended mode for unattended Gold/Silver play is `adaptive` with live-action
 gates enabled. `v2` is useful for deterministic planner debugging. `v1` remains
 available as a legacy recovery engine and teacher source.
+
+Fresh Gold/Silver runs rotate starters in V2/adaptive using
+`gold_autoplayer_v2_learning.json:starter_selection`:
+
+- Starter order: `cyndaquil -> totodile -> chikorita`.
+- Nickname order: `A`, `AA`, `AAA`, `AAAA`, `AAAAA`.
+- The live starter macro targets the selected Elm Lab ball using normalized live
+  coordinates and short holds to avoid overstepping.
+- If the nickname keyboard still appears active after the planned sequence, the
+  bot stops typing instead of blindly entering more input.
 
 ## Red/Blue
 
@@ -78,6 +90,22 @@ Not safe to share directly:
 - Blocked edges.
 - Battle menus or cursor offsets.
 - Learned policy weights from one ROM/profile.
+
+## ROM Onboarding And Isolation
+
+The dashboard/onboarding flow accepts user-provided `.gb`, `.gbc`, and `.gba`
+files, records metadata through `/roms`, and returns a restart launch command for
+the selected ROM. The server intentionally does not hot-swap emulator ROMs in
+process. Switching games requires restarting the server so emulator state, save
+files, run snapshots, and learning memory move together.
+
+Uploaded ROMs are isolated under a profile data directory such as
+`games/<game>-<romhash>`. This prevents Gold/Silver starter facts, map edges, and
+policy weights from contaminating Red/Blue/Yellow/generic profiles.
+
+Temporary public sharing should use read-only watch or upload links. Share
+`/dashboard/watch.html` for viewing and avoid sharing `/dashboard/` unless full
+control access is intentional.
 
 ## Adding A New Game Plugin
 

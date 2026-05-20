@@ -20,7 +20,8 @@
         map: document.getElementById('mapValue'),
         position: document.getElementById('positionValue'),
         objective: document.getElementById('objectiveValue'),
-        diagnostics: document.getElementById('diagnosticsValue')
+        diagnostics: document.getElementById('diagnosticsValue'),
+        why: document.getElementById('whyValue')
     };
 
     var rtcPeer = null;
@@ -66,11 +67,14 @@
         var state = payload.state || {};
         var nav = status.navigation || {};
         var readiness = (payload.v2_readiness || {}).runner_readiness || {};
+        var intent = status.intent || {};
+        var goal = intent.goal || status.current_goal || {};
+        var handoff = ((payload.mode_switch || {}).last_handoff || {});
         fields.engine.textContent = text(control.engine || status.engine, '--').toUpperCase();
         fields.phase.textContent = text(status.phase, '--');
         fields.turn.textContent = text(status.turn, '--');
-        fields.action.textContent = actionText(status.actions);
-        fields.objective.textContent = text(control.objective || status.objective || status.current_goal, 'No objective reported.');
+        fields.action.textContent = actionText((nav.posted_actions && nav.posted_actions.length) ? nav.posted_actions : status.actions);
+        fields.objective.textContent = text(goal.name || control.objective || status.objective || status.current_task, 'No objective reported.');
 
         if (state.map) fields.map.textContent = text(state.map.map_name, '--');
         if (state.player && state.player.position) {
@@ -86,6 +90,18 @@
         if (readiness.blockers && readiness.blockers.length) diag.push('blockers: ' + readiness.blockers.join(', '));
         if (readiness.safe_to_post_actions != null) diag.push('safe_to_act: ' + readiness.safe_to_post_actions);
         fields.diagnostics.textContent = diag.length ? diag.join('\n') : 'No blockers reported.';
+
+        if (fields.why) {
+            var why = [];
+            why.push('Goal: ' + text(goal.name || goal.type || status.current_task, 'not reported'));
+            why.push('Because: ' + text(goal.reason || nav.reason || status.message, 'runner did not report a reason'));
+            why.push('Policy: ' + text(intent.selected_policy || nav.battle_policy || nav.path_source || status.macro, 'not reported'));
+            why.push('Planned: ' + actionText(status.actions));
+            if (nav.posted_actions && nav.posted_actions.length) why.push('Posted: ' + nav.posted_actions.join(', '));
+            if (handoff.reason) why.push('Mode handoff: ' + handoff.from + ' -> ' + handoff.to + ' because ' + handoff.reason);
+            if (readiness.blockers && readiness.blockers.length) why.push('Blocked by: ' + readiness.blockers.join(', '));
+            fields.why.textContent = why.join('\n');
+        }
 
         renderLog(payload.recent || []);
     }
@@ -162,6 +178,7 @@
         };
         watchSocket.onclose = function () {
             watchSocket = null;
+            if (chatLog) chatLog.innerHTML = '<div class="chat-entry muted">Chat disconnected. Reconnecting...</div>';
             window.setTimeout(connectWatchSocket, 2000);
         };
     }
@@ -176,6 +193,7 @@
         };
         if (!watchSocket || watchSocket.readyState !== WebSocket.OPEN) {
             connectWatchSocket();
+            if (chatLog) appendChat({name: 'system', message: 'Chat is reconnecting; try again in a moment.'});
             return;
         }
         watchSocket.send(JSON.stringify(payload));
@@ -245,10 +263,14 @@
 
     function startScreenshotFallback(message) {
         setConnection(message, false);
-        streamOverlay.classList.add('hidden');
         gameStream.classList.add('hidden');
         fallbackScreen.classList.remove('hidden');
         if (screenshotTimer) return;
+        fallbackScreen.onload = function () { streamOverlay.classList.add('hidden'); };
+        fallbackScreen.onerror = function () {
+            streamOverlay.classList.remove('hidden');
+            streamOverlay.textContent = 'Waiting for fallback frame...';
+        };
         function loadFrame() {
             fallbackScreen.src = baseURL() + '/screenshot?watch=' + Date.now();
         }

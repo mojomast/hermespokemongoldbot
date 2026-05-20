@@ -31,12 +31,16 @@ from pokemon_agent.gameplay.story import (
     ROUTE31_GRIND_TARGET,
     ROUTE32_TARGET,
     ROUTE33_TARGET,
+    STARTER_CHOICES,
     UNION_CAVE_TARGET,
     FALKNER_MIN_HP_RATIO,
     FALKNER_MIN_LEVEL,
+    FALKNER_MIN_BACKUP_LEVEL,
+    FALKNER_MIN_PARTY_COUNT,
     STARTER_TARGET,
     VIOLET_CITY_TARGET,
     VIOLET_GATE_TARGET,
+    VIOLET_POKECENTER_AIDE_TARGET,
     VIOLET_GYM_LOBBY_TARGET,
     VIOLET_MART_BUY_TARGET,
     VIOLET_POKECENTER_HEAL_TARGET,
@@ -46,6 +50,7 @@ from pokemon_agent.gameplay.story import (
 from pokemon_agent.navigation import GOLD_MAP_REGISTRY, RoutePlan, RouteTarget, plan_route_to_target
 from pokemon_agent.navigation.route_planner import find_map_path, transition_between
 from pokemon_agent.autoplayer.learning import LearningFact, LearningMemory, import_gold_v1_teacher_snapshot, read_optional_json
+from pokemon_agent.autoplayer.save_states import MilestoneSaveStateManager
 
 
 DEFAULT_OBJECTIVE = "reach Violet City and win the first gym badge"
@@ -73,14 +78,44 @@ ALLOWED_ACTIONS = frozenset({
 })
 STUCK_CIRCUIT_BREAKER_THRESHOLD = 3
 BATTLE_NO_PROGRESS_THRESHOLD = 6
+FORCED_CAPTURE_MAX_FALLBACK_CYCLES = 3
 NEW_GAME_BOOTSTRAP_SEQUENCE: tuple[str, ...] = ("wait_300", "wait_600", "press_start", "press_a")
 TEXT_INPUT_END_SEQUENCE: tuple[str, ...] = ("press_a",)
 NICKNAME_END_SEQUENCE = TEXT_INPUT_END_SEQUENCE
+SILLY_STARTER_NICKNAMES: tuple[str, ...] = ("A", "AA", "AAA", "AAAA", "AAAAA")
+STARTER_CHOICE_ORDER: tuple[str, ...] = ("cyndaquil", "totodile", "chikorita")
 BATTLE_RUN_SEQUENCE: tuple[str, ...] = ("press_b", "press_b", "press_down", "press_right", "press_a")
+BATTLE_CAPTURE_OPEN_PACK_SEQUENCE: tuple[str, ...] = ("press_b", "press_b", "press_down", "press_a")
+# When Gold/Silver menu RAM is implausible during wild capture, opening Pack is
+# only half the fallback. The live run can land in the Pack with no usable menu
+# decode; blocking there causes an infinite press-A/no-progress loop. This
+# bounded continuation moves from Items to Balls, selects the first ball, then
+# confirms use. It is only used when state independently confirms: wild battle,
+# catch policy says throw_ball, and the bag reader sees balls available.
+BATTLE_CAPTURE_THROW_BALL_SEQUENCE: tuple[str, ...] = ("press_right", "press_a", "press_a")
+BATTLE_RECOVERY_SEQUENCE: tuple[str, ...] = ("press_b", "wait_300", "press_a")
+AMBIGUOUS_DIALOGUE_RECOVERY_SEQUENCE: tuple[str, ...] = ("wait_300", "press_b", "press_a")
+STALE_DIALOGUE_RECOVERY_SEQUENCE: tuple[str, ...] = ("press_b", "wait_300", "press_a", "walk_down")
+AIDE_NURSE_DIALOGUE_ESCAPE_SEQUENCE: tuple[str, ...] = ("press_down", "press_a", "press_b", "walk_down")
 TRAINER_MISSING_MENU_FIGHT_SEQUENCE: tuple[str, ...] = ("press_b", "press_b", "press_up", "press_left", "press_a", "press_a")
+MOVE_SLOT_SELECT_SEQUENCES: tuple[tuple[str, ...], ...] = ((), ("press_down",), ("press_down", "press_down"), ("press_down", "press_down", "press_down"))
+DAMAGING_MOVE_IDS: frozenset[int] = frozenset({10, 16, 17, 22, 29, 33, 40, 44, 52, 55, 60, 65, 71, 84, 98, 99, 122, 125, 129, 145, 154, 172})
+MOVE_DAMAGE_PRIORITY: dict[int, int] = {
+    52: 40,  # Ember beats early-game normal attacks, especially in caves.
+    55: 40,
+    84: 40,
+    33: 35,
+}
 TRAINER_MISSING_MENU_HEAL_SEQUENCE: tuple[str, ...] = ("press_b", "press_b", "press_up", "press_right", "press_a", "press_a", "press_a")
 MART_BUY_ONE_SEQUENCE: tuple[str, ...] = ("press_a", "press_a", "press_a", "press_a")
+MART_BUY_POTION_FROM_TOP_SEQUENCE: tuple[str, ...] = ("press_down", *MART_BUY_ONE_SEQUENCE)
 ROUTE31_GRIND_SEQUENCE: tuple[str, ...] = ("walk_left", "walk_right")
+MIN_BALLS_BEFORE_FALKNER = 2
+MIN_HEALING_ITEMS_BEFORE_FALKNER = 1
+MONEY_RESERVE_BEFORE_FALKNER = 300
+POKE_BALL_PRICE = 200
+POTION_PRICE = 300
+POTION_ITEM_ID = 0x12
 WALK_DELTAS: dict[str, tuple[int, int]] = {
     "up": (0, -1),
     "down": (0, 1),
@@ -133,6 +168,23 @@ def battle_progress_signature(state: dict[str, Any] | None) -> tuple[Any, ...] |
     )
 
 
+def battle_identity(state: dict[str, Any] | None) -> tuple[Any, ...] | None:
+    if not state:
+        return None
+    battle = state.get("battle") or {}
+    if battle.get("in_battle") is not True:
+        return None
+    map_info = state.get("map") or {}
+    return (
+        battle.get("type_id"),
+        battle.get("wild_species_id") or battle.get("enemy_species_id"),
+        battle.get("enemy_level"),
+        battle.get("enemy_max_hp"),
+        map_info.get("map_group"),
+        map_info.get("map_number"),
+    )
+
+
 def walk_hold_frames_for_navigation(action: str, navigation: dict[str, Any] | None) -> int | None:
     """Use shorter holds near doors/warps so one logical step stays one tile."""
     if not action.startswith("walk_") or not isinstance(navigation, dict):
@@ -141,6 +193,8 @@ def walk_hold_frames_for_navigation(action: str, navigation: dict[str, Any] | No
     if navigation.get("transition") is not None:
         return SHORT_WALK_HOLD_FRAMES
     if "gate" in path_source or "warp" in path_source or "door" in path_source:
+        return SHORT_WALK_HOLD_FRAMES
+    if path_source == "starter_live_macro":
         return SHORT_WALK_HOLD_FRAMES
     return None
 
@@ -163,6 +217,88 @@ def effective_navigation_tile(state: dict[str, Any], key: tuple[int, int] | None
             "raw_tile": {"x": raw_tile[0], "y": raw_tile[1]},
         }
     return tile, {"coordinate_source": "normalized_unwalkable", "normalized_tile": {"x": tile[0], "y": tile[1]}}
+
+
+def ruins_of_alph_room_local_tile(state: dict[str, Any], key: tuple[int, int] | None) -> tuple[int, int] | None:
+    if key not in {(3, 23), (3, 29)}:
+        return None
+    map_spec = GOLD_MAP_REGISTRY.get(key)
+    if map_spec is None:
+        return None
+    position = ((state.get("player") or {}).get("position") or {})
+    candidates = []
+    for x_key, y_key in (("actual_x", "actual_y"), ("raw_x", "raw_y"), ("x", "y")):
+        x = position.get(x_key)
+        y = position.get(y_key)
+        if isinstance(x, int) and isinstance(y, int):
+            candidates.append((x, y))
+            candidates.append((x, y - map_spec.tile_height))
+    for candidate in candidates:
+        x, y = candidate
+        if 0 <= x < map_spec.tile_width and 0 <= y < map_spec.tile_height:
+            return candidate
+    return None
+
+
+def union_cave_live_alias_state(state: dict[str, Any], key: tuple[int, int] | None) -> dict[str, Any] | None:
+    if key != (3, 29):
+        return None
+    position = ((state.get("player") or {}).get("position") or {})
+    actual_x = position.get("actual_x")
+    actual_y = position.get("actual_y")
+    union_cave = GOLD_MAP_REGISTRY.get((3, 37))
+    if not isinstance(actual_x, int) or not isinstance(actual_y, int) or union_cave is None:
+        return None
+    if not (0 <= actual_x < union_cave.tile_width and 0 <= actual_y < union_cave.tile_height):
+        return None
+    aliased = dict(state)
+    aliased_player = dict(state.get("player") or {})
+    aliased_position = dict(position)
+    aliased_position.update({
+        "map_group": 3,
+        "map_number": 37,
+        "map_name": "Union Cave 1F",
+        "trusted": True,
+        "in_bounds": True,
+        "confidence": "aliased",
+    })
+    aliased_player["position"] = aliased_position
+    aliased["player"] = aliased_player
+    aliased_map = dict(state.get("map") or {})
+    aliased_map.update({
+        "map_group": 3,
+        "map_number": 37,
+        "map_name": "Union Cave 1F",
+        "trusted": True,
+        "position_in_bounds": True,
+        "confidence": "aliased",
+    })
+    aliased["map"] = aliased_map
+    return aliased
+
+
+def ruins_of_alph_escape_action(state: dict[str, Any], key: tuple[int, int] | None) -> tuple[str, dict[str, Any]] | None:
+    if union_cave_live_alias_state(state, key) is not None:
+        return None
+    tile = ruins_of_alph_room_local_tile(state, key)
+    if tile is None:
+        return None
+    x, y = tile
+    if x < 3:
+        action = "walk_right"
+    elif x > 4:
+        action = "walk_left"
+    elif y < 9:
+        action = "walk_down"
+    else:
+        action = "walk_down"
+    return action, {
+        "path_source": "ruins_of_alph_escape",
+        "next_step": action,
+        "planned_path_length": abs(x - 3) if x < 3 else abs(x - 4) if x > 4 else max(1, 9 - y + 1),
+        "room_local_tile": {"x": x, "y": y},
+        "reason": "escape Ruins of Alph room with untrusted RAM position after Zephyr",
+    }
 
 
 def expected_tile_after_walk(tile: tuple[int, int], action: str) -> tuple[int, int] | None:
@@ -240,7 +376,26 @@ def verify_single_action(
             return True, "starter_obtained"
         before_dialog = before_state.get("dialog") or {}
         after_dialog = after_state.get("dialog") or {}
-        if (before_state.get("visual") or {}) != (after_state.get("visual") or {}):
+        before_menu = observed_menu(before_state)
+        after_menu = observed_menu(after_state)
+        visual_changed = (before_state.get("visual") or {}) != (after_state.get("visual") or {})
+        implausible_visual_textbox_without_semantic_progress = (
+            visual_changed
+            and visual_dialogue_active(before_state)
+            and visual_dialogue_active(after_state)
+            and before_dialog.get("window_stack_plausible") is False
+            and after_dialog.get("window_stack_plausible") is False
+            and before_dialog.get("ram_active") is False
+            and after_dialog.get("ram_active") is False
+            and before.position == after.position
+            and before.battle == after.battle
+            and before.party == after.party
+            and before_dialog == after_dialog
+            and before_menu == after_menu
+        )
+        if implausible_visual_textbox_without_semantic_progress:
+            return False, "press_a_visual_only_no_semantic_progress"
+        if visual_changed:
             return True, "visual_state_changed_after_press_a"
         if before.position != after.position:
             return True, "state_changed_after_press_a"
@@ -248,8 +403,6 @@ def verify_single_action(
             return True, "battle_state_changed_after_press_a"
         if before_dialog != after_dialog:
             return True, "dialogue_state_changed_after_press_a"
-        before_menu = observed_menu(before_state)
-        after_menu = observed_menu(after_state)
         if before_menu != after_menu and (before_menu or after_menu):
             return True, "menu_state_changed_after_press_a"
         if before.party != after.party:
@@ -329,6 +482,7 @@ def pre_overworld_text_active(state: dict[str, Any]) -> bool:
         visual.get("visual_textbox_active") is True
         or visual.get("bright_dialogue_panel") is True
         or float(visual.get("bright_lower") or 0.0) > 0.7
+        or (visual.get("screen_class") == "menu_or_text" and float(visual.get("bright_lower") or 0.0) > 0.25)
     )
 
 
@@ -355,6 +509,8 @@ def text_or_dialogue_suspected(state: dict[str, Any] | None) -> bool:
 def likely_starter_nickname_screen(state: dict[str, Any]) -> bool:
     snapshot = snapshot_from_state(state)
     if not snapshot.has_starter or snapshot.position.map_key != (24, 5):
+        return False
+    if snapshot.story.got_mystery_egg_from_mr_pokemon or snapshot.story.elm_called_about_stolen_pokemon:
         return False
     if snapshot.battle.in_battle or confirmed_dialogue(state.get("dialog") or {}):
         return False
@@ -390,17 +546,91 @@ def likely_text_input_keyboard(state: dict[str, Any]) -> bool:
 
 
 def likely_mart_purchase_screen(state: dict[str, Any]) -> bool:
-    snapshot = snapshot_from_state(state)
-    if snapshot.position.map_key != VIOLET_MART_BUY_TARGET.map_key:
+    if mart_purchase_policy(state) is None:
         return False
-    balls = sum(item.quantity for item in snapshot.bag if item.item_id in BALL_ITEM_IDS)
-    if balls >= 3 or (snapshot.money or 0) < 200:
+    snapshot = snapshot_from_state(state)
+    menu = observed_menu(state)
+    if menu.get("name") == "mart_items" or menu.get("selected_item_id") is not None or menu.get("visible_items"):
+        return True
+    if snapshot.position.tile not in VIOLET_MART_BUY_TARGET.tiles:
         return False
     dialog = state.get("dialog") or {}
     if confirmed_dialogue(dialog) or visual_dialogue_active(state) or ambiguous_dialogue(dialog):
         return True
     visual = state.get("visual") or {}
     return visual.get("screen_class") == "menu_or_text" and visual.get("visual_textbox_active") is not False
+
+
+def mart_purchase_policy(state: dict[str, Any]) -> str | None:
+    snapshot = snapshot_from_state(state)
+    if snapshot.position.map_key != VIOLET_MART_BUY_TARGET.map_key:
+        return None
+    inventory = summarize_inventory(snapshot)
+    money = snapshot.money or 0
+    missing_heals = max(0, MIN_HEALING_ITEMS_BEFORE_FALKNER - inventory.healing_items)
+    if inventory.balls <= 0 and money >= POKE_BALL_PRICE:
+        return "balls"
+    if inventory.balls < MIN_BALLS_BEFORE_FALKNER and money >= POKE_BALL_PRICE + (missing_heals * POTION_PRICE) + MONEY_RESERVE_BEFORE_FALKNER:
+        return "balls"
+    if inventory.healing_items < MIN_HEALING_ITEMS_BEFORE_FALKNER and money >= POTION_PRICE + MONEY_RESERVE_BEFORE_FALKNER:
+        return "potions"
+    return None
+
+
+def selected_mart_item_id(state: dict[str, Any]) -> int | None:
+    menu = observed_menu(state)
+    if not menu:
+        raw_menu = state.get("menu") or {}
+        menu = raw_menu if isinstance(raw_menu, dict) else {}
+    return _selected_item_id(menu)
+
+
+def mart_purchase_sequence(state: dict[str, Any]) -> tuple[str, ...]:
+    policy = mart_purchase_policy(state)
+    selected_item = selected_mart_item_id(state)
+    if policy == "potions" and selected_item is None:
+        return ("press_b",)
+    if policy == "potions" and selected_item != POTION_ITEM_ID:
+        return MART_BUY_POTION_FROM_TOP_SEQUENCE
+    return MART_BUY_ONE_SEQUENCE
+
+
+def party_member_needs_pokecenter_heal(mon: dict[str, Any]) -> bool:
+    if mon.get("trusted") is False:
+        return False
+    hp = mon.get("hp")
+    max_hp = mon.get("max_hp")
+    if isinstance(hp, int) and isinstance(max_hp, int) and max_hp > 0 and hp < max_hp:
+        return True
+    status = mon.get("status_condition")
+    if isinstance(status, dict) and status.get("any") is True:
+        return True
+    status_raw = mon.get("status_raw")
+    return isinstance(status_raw, int) and status_raw != 0
+
+
+def state_has_pokecenter_healing_need(state: dict[str, Any]) -> bool:
+    return any(party_member_needs_pokecenter_heal(mon) for mon in (state.get("party") or []) if isinstance(mon, dict))
+
+
+def active_pokecenter_heal_dialogue(state: dict[str, Any]) -> bool:
+    snapshot = snapshot_from_state(state)
+    if select_route_target(state) == VIOLET_POKECENTER_AIDE_TARGET:
+        return False
+    return (
+        state_has_pokecenter_healing_need(state)
+        and snapshot.position.map_key == VIOLET_POKECENTER_HEAL_TARGET.map_key
+        and snapshot.position.tile in VIOLET_POKECENTER_HEAL_TARGET.tiles
+    )
+
+
+def badge_count_from_player(player: dict[str, Any]) -> int:
+    badges = player.get("badges")
+    if isinstance(badges, list):
+        return len(badges)
+    if isinstance(badges, int):
+        return badges
+    return 0
 
 
 def likely_untrusted_wild_battle_main(state: dict[str, Any]) -> bool:
@@ -412,7 +642,7 @@ def likely_untrusted_wild_battle_main(state: dict[str, Any]) -> bool:
     if confirmed_dialogue(state.get("dialog") or {}):
         return False
     visual = state.get("visual") or {}
-    return visual.get("screen_class") == "menu_or_text" and visual.get("visual_textbox_active") is not True
+    return visual.get("screen_class") in {"menu_or_text", "overworld_or_battle", "battle"} and visual.get("visual_textbox_active") is not True
 
 
 def likely_wild_grind_missing_menu(state: dict[str, Any]) -> bool:
@@ -466,6 +696,45 @@ def battle_untrusted(state: dict[str, Any]) -> bool:
     return battle.get("trusted") is False
 
 
+def lead_move_pps(state: dict[str, Any]) -> tuple[int | None, ...]:
+    party = state.get("party") or []
+    if not party or not isinstance(party[0], dict):
+        return ()
+    raw_pp = party[0].get("pp") or party[0].get("move_pp_raw") or []
+    pps: list[int | None] = []
+    for value in raw_pp[:4]:
+        pps.append(value if isinstance(value, int) else None)
+    return tuple(pps)
+
+
+def all_party_fainted(state: dict[str, Any]) -> bool:
+    party = state.get("party") or []
+    trusted_party = [mon for mon in party if isinstance(mon, dict) and mon.get("trusted") is not False]
+    if not trusted_party:
+        return False
+    return all(isinstance(mon.get("hp"), int) and mon.get("hp") <= 0 for mon in trusted_party)
+
+
+def preferred_move_slot(state: dict[str, Any]) -> int:
+    party = state.get("party") or []
+    lead = party[0] if party and isinstance(party[0], dict) else {}
+    moves = [move for move in (lead.get("moves") or [])[:4] if isinstance(move, int)]
+    pps = lead_move_pps(state)
+    usable_slots = [index for index, pp in enumerate(pps[:len(moves)]) if pp is None or pp > 0]
+    if not usable_slots:
+        return 0
+    damaging_slots = [index for index in usable_slots if index < len(moves) and moves[index] in DAMAGING_MOVE_IDS]
+    if damaging_slots:
+        return max(damaging_slots, key=lambda index: MOVE_DAMAGE_PRIORITY.get(moves[index], 30))
+    return usable_slots[0]
+
+
+def missing_menu_fight_sequence_for_state(state: dict[str, Any]) -> tuple[str, ...]:
+    move_slot = preferred_move_slot(state)
+    select_sequence = MOVE_SLOT_SELECT_SEQUENCES[move_slot] if 0 <= move_slot < len(MOVE_SLOT_SELECT_SEQUENCES) else ()
+    return ("press_b", "press_b", "press_up", "press_left", "press_a", *select_sequence, "press_a")
+
+
 def choose_battle_actions(state: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     snapshot = snapshot_from_state(state)
     dialog = state.get("dialog") or {}
@@ -511,6 +780,9 @@ def choose_battle_actions(state: dict[str, Any]) -> tuple[list[str], dict[str, A
             return choose_capture_actions(state)
         if catch_decision.action == "weaken":
             return choose_fight_actions(state, "wild_weaken", catch_decision.reason)
+        story_decision = explain_story_objective(state)
+        if story_decision.objective_key == "route31_grind" and lead_ratio is not None and lead_ratio >= 0.35:
+            return choose_fight_actions(state, "wild_grind", "route31 objective: fight safe non-target wild encounter for EXP")
         if should_grind_wild_encounter(snapshot):
             return choose_fight_actions(state, "wild_grind", "pre-Falkner grinding: no balls available, fight wild encounter for EXP")
         policy = "wild_run_low_hp" if lead_ratio is not None and lead_ratio < 0.25 else "wild_run"
@@ -539,15 +811,22 @@ def resource_accounting(snapshot: Any) -> dict[str, Any]:
     lead = snapshot.lead
     lead_hp_ratio = lead.hp_ratio if lead else None
     lead_level = lead.level if lead else None
+    backup_levels = [mon.level for mon in snapshot.party[1:] if mon.level is not None]
     has_zephyr = "Zephyr" in snapshot.badges or snapshot.story.has_zephyr_badge
     falkner_prep_ready = snapshot.story.learned_to_catch_pokemon and snapshot.story.gave_mystery_egg_to_elm
+    money = snapshot.money or 0
+    roster_blocked_by_resources = inventory.balls <= 0 and money < 200
+    lead_ready = lead_level is not None and lead_level >= FALKNER_MIN_LEVEL and (lead_hp_ratio is None or lead_hp_ratio >= FALKNER_MIN_HP_RATIO)
     readiness_blockers: list[str] = []
     if not has_zephyr and falkner_prep_ready:
+        if len(snapshot.party) < FALKNER_MIN_PARTY_COUNT and not (roster_blocked_by_resources and lead_ready):
+            readiness_blockers.append("party_count_below_falkner_floor")
+        elif not roster_blocked_by_resources and (len(backup_levels) < FALKNER_MIN_PARTY_COUNT - 1 or min(backup_levels) < FALKNER_MIN_BACKUP_LEVEL):
+            readiness_blockers.append("backup_levels_below_falkner_floor")
         if lead_level is None or lead_level < FALKNER_MIN_LEVEL:
             readiness_blockers.append("lead_level_below_falkner_floor")
         if lead_hp_ratio is not None and lead_hp_ratio < FALKNER_MIN_HP_RATIO:
             readiness_blockers.append("lead_hp_below_falkner_floor")
-    money = snapshot.money or 0
     can_restock_balls = money >= 200
     return {
         "money": money,
@@ -561,12 +840,15 @@ def resource_accounting(snapshot: Any) -> dict[str, Any]:
         "can_catch": inventory.can_catch,
         "can_restock_balls": can_restock_balls,
         "broke_no_balls": money < 200 and inventory.balls <= 0,
+        "roster_blocked_by_resources": roster_blocked_by_resources,
         "falkner_prep_ready": falkner_prep_ready,
         "falkner_ready": has_zephyr or (falkner_prep_ready and not readiness_blockers),
         "readiness_blockers": readiness_blockers,
         "minima": {
             "falkner_min_level": FALKNER_MIN_LEVEL,
             "falkner_min_hp_ratio": FALKNER_MIN_HP_RATIO,
+            "falkner_min_party_count": FALKNER_MIN_PARTY_COUNT,
+            "falkner_min_backup_level": FALKNER_MIN_BACKUP_LEVEL,
             "pokeball_cost": 200,
         },
     }
@@ -585,6 +867,58 @@ def should_grind_wild_encounter(snapshot: Any) -> bool:
     if inventory.balls > 0:
         return False
     return snapshot.position.map_key in {(26, 1), (26, 2), (10, 5), (26, 11)}
+
+
+def should_force_capture_despite_missing_menu(snapshot: Any, catch_decision: Any) -> bool:
+    """Keep catch-first pressure when RAM menu decode is broken.
+
+    This is deliberately narrower than the normal catch policy: it only overrides
+    the anti-loop fight escape while the early roster is still below the Falkner
+    prep floor and state independently says a wild, non-KO target can be caught.
+    """
+    battle = snapshot.battle
+    if catch_decision.action != "throw_ball":
+        return False
+    if not battle.wild:
+        return False
+    if battle.enemy_hp is not None and battle.enemy_hp <= 0:
+        return False
+    inventory = summarize_inventory(snapshot)
+    if inventory.balls <= 0 or snapshot.party_full:
+        return False
+    if len(snapshot.party) >= FALKNER_MIN_PARTY_COUNT:
+        return False
+    if battle.enemy_hp_ratio is not None and battle.enemy_hp_ratio <= 0.5:
+        return True
+    if battle.enemy_level is not None and battle.enemy_level <= 4:
+        return True
+    return battle.enemy_hp_ratio is None
+
+
+def readiness_allows_action(status: dict[str, Any], action: str) -> tuple[bool, str | None]:
+    readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
+    if readiness.get("safe_to_post_actions") is True:
+        return True, None
+    blockers = set(readiness.get("blockers") or [])
+    if not blockers:
+        return True, None
+    navigation = status.get("navigation") if isinstance(status.get("navigation"), dict) else {}
+    path_source = navigation.get("path_source")
+    battle_policy = navigation.get("battle_policy")
+    safe_untrusted_sources = {
+        "new_game_bootstrap",
+        "new_game_bootstrap_dialogue",
+        "fresh_run_intro_dialogue",
+        "dialogue",
+        "stale_dialogue_recovery",
+        "ambiguous_dialogue_recovery",
+        "adaptive_button_recovery",
+    }
+    if blockers <= {"position_untrusted"} and path_source in safe_untrusted_sources and not action.startswith("walk_"):
+        return True, None
+    if blockers <= {"battle_ram_untrusted"} and battle_policy == "advance_dialog" and action == "press_a":
+        return True, None
+    return False, ",".join(sorted(blockers))
 
 
 def observed_menu(state: dict[str, Any]) -> dict[str, Any]:
@@ -635,6 +969,10 @@ def menu_blocked_reason(state: dict[str, Any]) -> str:
         if not (menu.get("name") or menu.get("menu")):
             return menu.get("blocked_reason") or "missing_name"
     return "missing_menu_state"
+
+
+def capture_menu_ambiguous(state: dict[str, Any]) -> bool:
+    return menu_blocked_reason(state) in {"implausible_window_stack", "needs_stronger_decode", "low_confidence", "missing_name", "missing_menu_state"}
 
 
 def ram_health_from_state(state: dict[str, Any]) -> dict[str, Any]:
@@ -939,9 +1277,22 @@ class GoldAutoplayerV2:
         self.starter_face_up_attempted_at: tuple[int, int] | None = None
         self.elm_return_face_up_attempted_at: tuple[int, int] | None = None
         self.pokecenter_face_up_attempted_at: tuple[int, int] | None = None
+        self.pokecenter_aide_face_up_attempted_at: tuple[int, int] | None = None
+        self.pokecenter_heal_attempt_signature: tuple[int | None, int | None, int | None, int | None] | None = None
         self.mart_face_left_attempted_at: tuple[int, int] | None = None
         self.nickname_sequence_index = 0
+        self.active_starter_choice: str | None = None
+        self.active_starter_nickname: str | None = None
         self.battle_run_sequence_index = 0
+        self.battle_capture_sequence_index = 0
+        self.battle_capture_throw_sequence_index = 0
+        self.battle_capture_fallback_cycles = 0
+        self.last_battle_identity: tuple[Any, ...] | None = None
+        self.last_battle_identity_change: dict[str, Any] | None = None
+        self.capture_safety_events: deque[dict[str, Any]] = deque(maxlen=8)
+        self.battle_recovery_index = 0
+        self.ambiguous_dialogue_index = 0
+        self.stale_dialogue_recovery_index = 0
         self.trainer_missing_menu_fight_index = 0
         self.trainer_missing_menu_heal_index = 0
         self.trainer_missing_menu_heal_cycles = 0
@@ -954,6 +1305,12 @@ class GoldAutoplayerV2:
         self.loop_sleep_seconds = DEFAULT_LOOP_SLEEP_SECONDS
         self.learning = self.load_learning()
         self.shared_memory = LearningMemory(self.data_dir / "pokemon_learning_memory.json")
+        self.milestone_save_state_dry_run_default = os.environ.get("POKEMON_MILESTONE_SAVE_STATES_DRY_RUN", "1").lower() not in {"0", "false", "no"}
+        self.save_state_manager = MilestoneSaveStateManager(
+            self.data_dir,
+            self.base_url,
+            dry_run=self.milestone_save_state_dry_run_default,
+        )
         self.import_v1_learning_snapshot()
 
     @property
@@ -996,6 +1353,121 @@ class GoldAutoplayerV2:
         tmp = self.learning_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.learning, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self.learning_path)
+
+    def resolve_starter_choice(self) -> str:
+        selection = self.learning.setdefault("starter_selection", {})
+        if not isinstance(selection, dict):
+            selection = {}
+            self.learning["starter_selection"] = selection
+        active = selection.get("active_choice")
+        if active in STARTER_CHOICES:
+            self.active_starter_choice = str(active)
+            return str(active)
+        last_value = selection.get("last_choice_index", -1)
+        last_index = int(last_value) if isinstance(last_value, int) else -1
+        next_index = (last_index + 1) % len(STARTER_CHOICE_ORDER)
+        choice = STARTER_CHOICE_ORDER[next_index]
+        selection.update({"active_choice": choice, "active_choice_index": next_index, "updated_at": time.time()})
+        self.active_starter_choice = choice
+        self.persist_learning()
+        return choice
+
+    def resolve_starter_nickname(self) -> str:
+        selection = self.learning.setdefault("starter_selection", {})
+        if not isinstance(selection, dict):
+            selection = {}
+            self.learning["starter_selection"] = selection
+        active = selection.get("active_nickname")
+        if active in SILLY_STARTER_NICKNAMES:
+            self.active_starter_nickname = str(active)
+            return str(active)
+        last_value = selection.get("last_nickname_index", -1)
+        last_index = int(last_value) if isinstance(last_value, int) else -1
+        next_index = (last_index + 1) % len(SILLY_STARTER_NICKNAMES)
+        nickname = SILLY_STARTER_NICKNAMES[next_index]
+        selection.update({"active_nickname": nickname, "active_nickname_index": next_index, "updated_at": time.time()})
+        self.active_starter_nickname = nickname
+        self.persist_learning()
+        return nickname
+
+    def starter_nickname_sequence(self) -> tuple[str, ...]:
+        nickname = self.active_starter_nickname or self.resolve_starter_nickname()
+        return tuple("press_a" for _ in nickname) + ("press_start", "press_a")
+
+    def finalize_starter_selection(self) -> None:
+        selection = self.learning.setdefault("starter_selection", {})
+        if not isinstance(selection, dict):
+            return
+        choice = selection.get("active_choice")
+        nickname = selection.get("active_nickname")
+        if selection.get("active_choice_index") is not None:
+            selection["last_choice_index"] = selection.get("active_choice_index")
+        if selection.get("active_nickname_index") is not None:
+            selection["last_nickname_index"] = selection.get("active_nickname_index")
+        if choice is not None:
+            selection["last_choice"] = choice
+        if nickname is not None:
+            selection["last_nickname"] = nickname
+        selection.pop("active_choice", None)
+        selection.pop("active_choice_index", None)
+        selection.pop("active_nickname", None)
+        selection.pop("active_nickname_index", None)
+        selection["updated_at"] = time.time()
+        self.record_shared_fact(
+            "PKM:TEAM",
+            f"Selected starter {choice or 'unknown'} with nickname {nickname or 'unknown'}",
+            confidence="observed",
+            data={"kind": "starter_selection", "starter": choice, "nickname": nickname, "evidence_count": 1},
+        )
+        self.persist_learning()
+
+    def lead_health_signature(self, snapshot: Any) -> tuple[int | None, int | None, int | None, int | None] | None:
+        lead = getattr(snapshot, "lead", None)
+        if lead is None:
+            return None
+        return (lead.species_id, lead.level, lead.hp, lead.max_hp)
+
+    def suppress_repeated_pokecenter_heal(self, snapshot: Any) -> bool:
+        signature = self.lead_health_signature(snapshot)
+        lead = getattr(snapshot, "lead", None)
+        if signature is None or lead is None:
+            return False
+        if lead.hp_ratio is not None and lead.hp_ratio >= FALKNER_MIN_HP_RATIO:
+            self.pokecenter_heal_attempt_signature = None
+            return False
+        return self.pokecenter_heal_attempt_signature == signature
+
+    def target_after_pokecenter_heal_attempt(self, snapshot: Any) -> RouteTarget:
+        lead = getattr(snapshot, "lead", None)
+        if lead is not None and lead.hp_ratio is not None and lead.hp_ratio < FALKNER_MIN_HP_RATIO:
+            return ROUTE31_GRIND_TARGET
+        if lead is not None and lead.level is not None and lead.level < FALKNER_MIN_LEVEL:
+            return ROUTE31_GRIND_TARGET
+        return FALKNER_TARGET
+
+    def repeated_press_a_same_state_count(self, state: dict[str, Any]) -> int:
+        key = self.state_key_for_learning(state)
+        count = 0
+        for transition in reversed(self.recent_learning_transitions):
+            if transition.get("before") != key or transition.get("after") != key:
+                break
+            if transition.get("action") == "press_a":
+                count += 1
+        return count
+
+    def stale_dialogue_recovery_action(self, state: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        if self.stale_dialogue_recovery_index >= len(STALE_DIALOGUE_RECOVERY_SEQUENCE):
+            self.stale_dialogue_recovery_index = 0
+        action = STALE_DIALOGUE_RECOVERY_SEQUENCE[self.stale_dialogue_recovery_index]
+        self.stale_dialogue_recovery_index += 1
+        return action, {
+            "path_source": "stale_dialogue_recovery",
+            "next_step": action,
+            "planned_path_length": len(STALE_DIALOGUE_RECOVERY_SEQUENCE) - self.stale_dialogue_recovery_index + 1,
+            "recovery_reason": "repeated press_a left the game in the same state; treating dialogue detection as stale",
+            "same_state_press_a_count": self.repeated_press_a_same_state_count(state),
+            "dialogue_recovery_index": self.stale_dialogue_recovery_index - 1,
+        }
 
     def learning_summary(self) -> dict[str, Any]:
         action_values = self.learning.get("action_values") if isinstance(self.learning, dict) else {}
@@ -1152,7 +1624,28 @@ class GoldAutoplayerV2:
         except Exception:
             return reward
         if before.position.map_key != after.position.map_key:
-            reward += 1.5
+            before_story_progress = (
+                before.story.gave_mystery_egg_to_elm,
+                before.story.learned_to_catch_pokemon,
+                before.story.has_zephyr_badge,
+                len(before.party),
+                badge_count_from_player(before_state.get("player") or {}),
+            )
+            after_story_progress = (
+                after.story.gave_mystery_egg_to_elm,
+                after.story.learned_to_catch_pokemon,
+                after.story.has_zephyr_badge,
+                len(after.party),
+                badge_count_from_player(after_state.get("player") or {}),
+            )
+            if reason == "map_transition_observed" and before_story_progress == after_story_progress:
+                # Crossing a reversible map boundary verifies button/movement mechanics,
+                # but it is not strategic progress by itself. Keep a small shaping
+                # reward so the action is not treated as failed, while avoiding the
+                # high reward that taught A<->B boundary ping-pong as a goal.
+                reward += 0.1
+            else:
+                reward += 1.5
         elif before.position.tile != after.position.tile:
             reward += 0.6
         tile_key = f"{after.position.map_group}:{after.position.map_number}:{after.position.x}:{after.position.y}"
@@ -1160,8 +1653,8 @@ class GoldAutoplayerV2:
         reward += 0.2 / ((visits + 1) ** 0.5)
         if len(after.party) > len(before.party):
             reward += 5.0
-        before_badges = int((before_state.get("player") or {}).get("badges", 0) or 0)
-        after_badges = int((after_state.get("player") or {}).get("badges", 0) or 0)
+        before_badges = badge_count_from_player(before_state.get("player") or {})
+        after_badges = badge_count_from_player(after_state.get("player") or {})
         if after_badges > before_badges:
             reward += 20.0
         return round(reward, 4)
@@ -1190,6 +1683,9 @@ class GoldAutoplayerV2:
         if after_state is not None:
             try:
                 after = snapshot_from_state(after_state)
+                before = snapshot_from_state(before_state) if before_state is not None else None
+                if before is not None and after.has_starter and not before.has_starter:
+                    self.finalize_starter_selection()
                 tile_key = f"{after.position.map_group}:{after.position.map_number}:{after.position.x}:{after.position.y}"
                 visits = self.learning.setdefault("tile_visits", {})
                 visits[tile_key] = int(visits.get(tile_key, 0)) + 1
@@ -1213,7 +1709,7 @@ class GoldAutoplayerV2:
             "reward": reward,
             "reason": reason,
         })
-        if verified and reward > 0:
+        if verified and reward > 0 and not (reason == "map_transition_observed" and reward < 0.75):
             self.record_shared_fact(
                 "PKM:PROGRESS",
                 f"{action} made verified progress from {state_key} to {after_key}",
@@ -1311,7 +1807,6 @@ class GoldAutoplayerV2:
         snapshot = snapshot_from_state(before_state) if before_state else None
         if (
             action == "walk_up"
-            and not verified
             and executed
             and snapshot is not None
             and snapshot.position.map_key == STARTER_TARGET.map_key
@@ -1358,6 +1853,20 @@ class GoldAutoplayerV2:
             and not verified
             and executed
             and snapshot is not None
+            and snapshot.position.map_key == VIOLET_POKECENTER_AIDE_TARGET.map_key
+            and snapshot.position.tile in VIOLET_POKECENTER_AIDE_TARGET.tiles
+        ):
+            self.pokecenter_aide_face_up_attempted_at = snapshot.position.tile
+            self.last_step_verified = True
+            self.verification_reason = "pokecenter_aide_facing_attempted"
+            self.stuck_counter = 0
+            self.recovery_level = 0
+            return
+        if (
+            action == "walk_up"
+            and not verified
+            and executed
+            and snapshot is not None
             and snapshot.position.map_key == VIOLET_POKECENTER_HEAL_TARGET.map_key
             and snapshot.position.tile in VIOLET_POKECENTER_HEAL_TARGET.tiles
         ):
@@ -1367,16 +1876,54 @@ class GoldAutoplayerV2:
             self.stuck_counter = 0
             self.recovery_level = 0
             return
-        if action in TEXT_INPUT_END_SEQUENCE and likely_text_input_keyboard(before_state or {}):
-            expected = TEXT_INPUT_END_SEQUENCE[self.nickname_sequence_index] if self.nickname_sequence_index < len(TEXT_INPUT_END_SEQUENCE) else None
+        if (
+            action == "press_a"
+            and executed
+            and snapshot is not None
+            and snapshot.position.map_key == VIOLET_POKECENTER_HEAL_TARGET.map_key
+            and snapshot.position.tile in VIOLET_POKECENTER_HEAL_TARGET.tiles
+            and self.pokecenter_face_up_attempted_at == snapshot.position.tile
+        ):
+            self.pokecenter_heal_attempt_signature = self.lead_health_signature(snapshot)
+        if action in (*TEXT_INPUT_END_SEQUENCE, "press_start") and likely_text_input_keyboard(before_state or {}):
+            sequence = self.starter_nickname_sequence() if likely_starter_nickname_screen(before_state or {}) else TEXT_INPUT_END_SEQUENCE
+            expected = sequence[self.nickname_sequence_index] if self.nickname_sequence_index < len(sequence) else None
             if action == expected and executed:
                 self.nickname_sequence_index += 1
         if action in BATTLE_RUN_SEQUENCE and likely_untrusted_wild_battle_main(before_state or {}) and not likely_wild_grind_missing_menu(before_state or {}):
             expected = BATTLE_RUN_SEQUENCE[self.battle_run_sequence_index] if self.battle_run_sequence_index < len(BATTLE_RUN_SEQUENCE) else None
             if action == expected and executed:
                 self.battle_run_sequence_index += 1
-        if action in TRAINER_MISSING_MENU_FIGHT_SEQUENCE and (likely_trainer_battle_missing_menu(before_state or {}) or likely_wild_grind_missing_menu(before_state or {})):
-            expected = TRAINER_MISSING_MENU_FIGHT_SEQUENCE[self.trainer_missing_menu_fight_index] if self.trainer_missing_menu_fight_index < len(TRAINER_MISSING_MENU_FIGHT_SEQUENCE) else None
+        open_pack_complete_before_action = self.battle_capture_sequence_index >= len(BATTLE_CAPTURE_OPEN_PACK_SEQUENCE)
+        if action in BATTLE_CAPTURE_OPEN_PACK_SEQUENCE and likely_untrusted_wild_battle_main(before_state or {}):
+            catch_decision = choose_catch_action(snapshot_from_state(before_state or {}))
+            expected = BATTLE_CAPTURE_OPEN_PACK_SEQUENCE[self.battle_capture_sequence_index] if self.battle_capture_sequence_index < len(BATTLE_CAPTURE_OPEN_PACK_SEQUENCE) else None
+            if catch_decision.action == "throw_ball" and action == expected and executed:
+                self.battle_capture_sequence_index += 1
+        if open_pack_complete_before_action and action in BATTLE_CAPTURE_THROW_BALL_SEQUENCE and likely_untrusted_wild_battle_main(before_state or {}):
+            catch_decision = choose_catch_action(snapshot_from_state(before_state or {}))
+            expected = BATTLE_CAPTURE_THROW_BALL_SEQUENCE[self.battle_capture_throw_sequence_index] if self.battle_capture_throw_sequence_index < len(BATTLE_CAPTURE_THROW_BALL_SEQUENCE) else None
+            if catch_decision.action == "throw_ball" and action == expected and executed:
+                self.battle_capture_throw_sequence_index += 1
+        if action in BATTLE_RECOVERY_SEQUENCE and before_state is not None and (before_state.get("battle") or {}).get("in_battle") is True:
+            expected = BATTLE_RECOVERY_SEQUENCE[self.battle_recovery_index] if self.battle_recovery_index < len(BATTLE_RECOVERY_SEQUENCE) else None
+            if action == expected and executed:
+                self.battle_recovery_index += 1
+        missing_menu_fight_active = (
+            likely_trainer_battle_missing_menu(before_state or {})
+            or likely_wild_grind_missing_menu(before_state or {})
+            or (
+                likely_untrusted_wild_battle_main(before_state or {})
+                and (
+                    choose_catch_action(snapshot_from_state(before_state or {})).action == "weaken"
+                    or self.battle_capture_fallback_cycles >= 2
+                    or self.battle_no_progress_count >= BATTLE_NO_PROGRESS_THRESHOLD
+                )
+            )
+        )
+        if missing_menu_fight_active and action in (*TRAINER_MISSING_MENU_FIGHT_SEQUENCE, *missing_menu_fight_sequence_for_state(before_state or {})):
+            sequence = missing_menu_fight_sequence_for_state(before_state or {})
+            expected = sequence[self.trainer_missing_menu_fight_index] if self.trainer_missing_menu_fight_index < len(sequence) else None
             if action == expected and executed:
                 self.trainer_missing_menu_fight_index += 1
         if action in TRAINER_MISSING_MENU_HEAL_SEQUENCE and likely_trainer_battle_missing_menu(before_state or {}):
@@ -1385,13 +1932,28 @@ class GoldAutoplayerV2:
                 self.trainer_missing_menu_heal_index += 1
                 if self.trainer_missing_menu_heal_index >= len(TRAINER_MISSING_MENU_HEAL_SEQUENCE):
                     self.trainer_missing_menu_heal_cycles += 1
-        if (likely_trainer_battle_missing_menu(before_state or {}) or likely_wild_grind_missing_menu(before_state or {})) and action in (*TRAINER_MISSING_MENU_HEAL_SEQUENCE, *TRAINER_MISSING_MENU_FIGHT_SEQUENCE) and not verified and executed:
+        if missing_menu_fight_active and action in (*TRAINER_MISSING_MENU_HEAL_SEQUENCE, *TRAINER_MISSING_MENU_FIGHT_SEQUENCE, *missing_menu_fight_sequence_for_state(before_state or {})) and not verified and executed:
             self.last_step_verified = True
             self.verification_reason = "battle_missing_menu_sequence_step_posted"
             self.button_failure_count = 0
             return
-        if action in MART_BUY_ONE_SEQUENCE and likely_mart_purchase_screen(before_state or {}):
-            expected = MART_BUY_ONE_SEQUENCE[self.mart_buy_sequence_index] if self.mart_buy_sequence_index < len(MART_BUY_ONE_SEQUENCE) else None
+        if action in BATTLE_CAPTURE_OPEN_PACK_SEQUENCE and likely_untrusted_wild_battle_main(before_state or {}) and not verified and executed:
+            catch_decision = choose_catch_action(snapshot_from_state(before_state or {}))
+            if catch_decision.action == "throw_ball":
+                self.last_step_verified = True
+                self.verification_reason = "battle_capture_open_pack_sequence_step_posted"
+                self.button_failure_count = 0
+                return
+        if open_pack_complete_before_action and action in BATTLE_CAPTURE_THROW_BALL_SEQUENCE and likely_untrusted_wild_battle_main(before_state or {}) and not verified and executed:
+            catch_decision = choose_catch_action(snapshot_from_state(before_state or {}))
+            if catch_decision.action == "throw_ball":
+                self.last_step_verified = True
+                self.verification_reason = "battle_capture_throw_ball_sequence_step_posted"
+                self.button_failure_count = 0
+                return
+        if action in (*MART_BUY_ONE_SEQUENCE, *MART_BUY_POTION_FROM_TOP_SEQUENCE) and likely_mart_purchase_screen(before_state or {}):
+            sequence = mart_purchase_sequence(before_state or {})
+            expected = sequence[self.mart_buy_sequence_index] if self.mart_buy_sequence_index < len(sequence) else None
             if action == expected and executed:
                 self.mart_buy_sequence_index += 1
         if action in NEW_GAME_BOOTSTRAP_SEQUENCE and before_state is not None:
@@ -1435,6 +1997,10 @@ class GoldAutoplayerV2:
             self.button_failure_count = 0
             self.recovery_level = 0
             self.adaptive_recovery_index = 0
+            self.battle_recovery_index = 0
+            self.ambiguous_dialogue_index = 0
+            if action.startswith("walk_") or reason in {"map_transition_observed", "position_changed_after_walk", "position_advanced_after_walk"}:
+                self.stale_dialogue_recovery_index = 0
             if reason == "map_transition_observed":
                 self.blocked_edges_by_map.clear()
 
@@ -1491,7 +2057,7 @@ class GoldAutoplayerV2:
         })
 
     def reset_recovery_after_manual_progress(self, state: dict[str, Any]) -> None:
-        if self.stuck_counter == 0 and self.recovery_level == 0:
+        if self.stuck_counter == 0 and self.recovery_level == 0 and self.button_failure_count == 0:
             return
         snapshot = snapshot_from_state(state)
         current_key = snapshot.position.map_key
@@ -1514,6 +2080,7 @@ class GoldAutoplayerV2:
                         self.blocked_edges_by_map.pop(current_key, None)
             if current_key != previous_key or current_tile != previous_tile:
                 self.stuck_counter = 0
+                self.button_failure_count = 0
                 self.recovery_level = 0
             return
 
@@ -1550,7 +2117,47 @@ class GoldAutoplayerV2:
             "blocked_edges_by_map": blocked_by_map,
             "button_failures": self.button_failure_count,
             "recent_failures": list(self.recent_failures),
+            "battle_identity": self.last_battle_identity,
+            "battle_identity_change": self.last_battle_identity_change,
+            "capture_safety": list(self.capture_safety_events),
         }
+
+    def reset_battle_sequences(self, reason: str) -> None:
+        self.battle_run_sequence_index = 0
+        self.battle_capture_sequence_index = 0
+        self.battle_capture_throw_sequence_index = 0
+        self.battle_capture_fallback_cycles = 0
+        self.battle_recovery_index = 0
+        self.trainer_missing_menu_fight_index = 0
+        self.trainer_missing_menu_heal_index = 0
+        self.trainer_missing_menu_heal_cycles = 0
+        self.battle_no_progress_count = 0
+        self.last_battle_identity_change = {"reason": reason, "updated_at": time.time()}
+
+    def sync_battle_identity(self, state: dict[str, Any] | None) -> None:
+        identity = battle_identity(state)
+        if identity == self.last_battle_identity:
+            return
+        previous = self.last_battle_identity
+        self.last_battle_identity = identity
+        self.reset_battle_sequences("battle_identity_changed" if identity is not None else "battle_ended")
+        self.last_battle_identity_change = {
+            "reason": "battle_identity_changed" if identity is not None else "battle_ended",
+            "previous": previous,
+            "current": identity,
+            "updated_at": time.time(),
+        }
+
+    def record_capture_safety_event(self, state: dict[str, Any], reason: str, action: str | None = None) -> None:
+        self.capture_safety_events.append({
+            "reason": reason,
+            "action": action,
+            "blocked_reason": menu_blocked_reason(state),
+            "battle_identity": battle_identity(state),
+            "open_pack_index": self.battle_capture_sequence_index,
+            "throw_index": self.battle_capture_throw_sequence_index,
+            "updated_at": time.time(),
+        })
 
     def recovery_circuit_open(self) -> bool:
         return self.recovery_level >= 2
@@ -1638,6 +2245,18 @@ class GoldAutoplayerV2:
         action_source = "v1_teacher" if action is not None else "least_visited_neighbor"
         if action is None:
             action = self.least_visited_neighbor_action(key, tile)
+        if action is None and self.blocked_directions_at_tile(key, tile):
+            # All local edges can be marked blocked after a battle/menu overlay because
+            # overworld walk attempts made while input is still being consumed look
+            # like wall bumps. Treat that as stale once every option is exhausted:
+            # clear only this tile's blocked edges and immediately try a real move
+            # instead of waiting forever.
+            stale_edges = self.blocked_edges_by_map.get(key, set())
+            self.blocked_edges_by_map[key] = {edge for edge in stale_edges if edge[0] != tile}
+            if not self.blocked_edges_by_map[key]:
+                self.blocked_edges_by_map.pop(key, None)
+            action = self.least_visited_neighbor_action(key, tile)
+            action_source = "clear_stale_blocked_edges"
         if action is None:
             action = "wait_300"
             action_source = "wait_fallback"
@@ -1706,14 +2325,50 @@ class GoldAutoplayerV2:
             } | self.blocked_edge_status()
         dialog = state.get("dialog") or {}
         if snapshot.battle.in_battle:
+            battle_fallback_no_progress = self.battle_no_progress_count >= BATTLE_NO_PROGRESS_THRESHOLD
+            active_battle_sequence = any((self.battle_run_sequence_index, self.battle_capture_sequence_index, self.battle_capture_throw_sequence_index, self.trainer_missing_menu_fight_index, self.trainer_missing_menu_heal_index)) or (likely_untrusted_wild_battle_main(state) and battle_fallback_no_progress)
+            if self.recovery_circuit_open() and not active_battle_sequence:
+                if self.battle_recovery_index >= len(BATTLE_RECOVERY_SEQUENCE):
+                    self.battle_recovery_index = 0
+                action = BATTLE_RECOVERY_SEQUENCE[self.battle_recovery_index]
+                self.battle_run_sequence_index = 0
+                self.battle_capture_sequence_index = 0
+                self.battle_capture_throw_sequence_index = 0
+                self.battle_capture_fallback_cycles = 0
+                self.trainer_missing_menu_fight_index = 0
+                self.trainer_missing_menu_heal_index = 0
+                return [action], {
+                    "path_source": "battle_resume_recovery",
+                    "battle_policy": "resume_after_no_progress",
+                    "controller": "recovery",
+                    "controller_state": "fallback_battle_resume_sequence",
+                    "next_step": action,
+                    "planned_path_length": len(BATTLE_RECOVERY_SEQUENCE) - self.battle_recovery_index,
+                    "battle_recovery_index": self.battle_recovery_index,
+                    "recovery_reason": self.verification_reason,
+                    "button_failures": self.button_failure_count,
+                    "battle_no_progress_count": self.battle_no_progress_count,
+                    "return_policy": "normal_battle_policy_after_verified_progress",
+                } | self.blocked_edge_status()
             if battle_untrusted(state):
                 return choose_battle_actions(state)
+            if snapshot.battle.enemy_hp is not None and snapshot.battle.enemy_hp <= 0:
+                return ["press_a"], {
+                    "path_source": "battle_fallback",
+                    "battle_policy": "advance_post_ko_text",
+                    "controller": "dialogue",
+                    "controller_state": "fallback_post_ko_advance",
+                    "next_step": "press_a",
+                    "planned_path_length": 1,
+                    "reason": "enemy HP is zero; advance battle result text instead of trying to catch/fight a KO target",
+                    "blocked_reason": menu_blocked_reason(state),
+                } | self.blocked_edge_status()
             if likely_trainer_battle_missing_menu(state):
-                # With one party member, hidden menu drift into PKMN/switch is worse than low HP.
-                # Prefer backing out and forcing Fight instead of navigating near switch UI.
+                # With low HP and a verified healing item, survive first; otherwise
+                # hidden menu drift into PKMN/switch is worse than attacking.
                 party_count = len(snapshot.party)
                 use_heal_sequence = party_count > 1 and snapshot.lead is not None and snapshot.lead.hp_ratio is not None and snapshot.lead.hp_ratio < 0.35 and has_healing_item(snapshot) and self.trainer_missing_menu_heal_cycles < 1
-                sequence = TRAINER_MISSING_MENU_HEAL_SEQUENCE if use_heal_sequence else TRAINER_MISSING_MENU_FIGHT_SEQUENCE
+                sequence = TRAINER_MISSING_MENU_HEAL_SEQUENCE if use_heal_sequence else missing_menu_fight_sequence_for_state(state)
                 index = self.trainer_missing_menu_heal_index if use_heal_sequence else self.trainer_missing_menu_fight_index
                 if index >= len(sequence):
                     index = 0
@@ -1730,21 +2385,119 @@ class GoldAutoplayerV2:
                     "next_step": action,
                     "planned_path_length": len(sequence) - index,
                     "battle_sequence_index": index,
+                    "move_slot": preferred_move_slot(state) if not use_heal_sequence else None,
+                    "move_pp": list(lead_move_pps(state)),
                     "reason": "trainer battle menu RAM unavailable with low HP; backing out and using Potion" if use_heal_sequence else "trainer battle menu RAM unavailable; backing out and forcing Fight/first move",
                     "blocked_reason": menu_blocked_reason(state),
                 }
+            if likely_untrusted_wild_battle_main(state):
+                catch_decision = choose_catch_action(snapshot)
+                if catch_decision.action == "throw_ball":
+                    force_capture = should_force_capture_despite_missing_menu(snapshot, catch_decision)
+                    forced_capture_exhausted = self.battle_capture_fallback_cycles >= min(FORCED_CAPTURE_MAX_FALLBACK_CYCLES, max(1, summarize_inventory(snapshot).balls))
+                    ambiguous_capture_after_open_pack = self.battle_capture_sequence_index >= len(BATTLE_CAPTURE_OPEN_PACK_SEQUENCE) and capture_menu_ambiguous(state)
+                    if ambiguous_capture_after_open_pack:
+                        self.record_capture_safety_event(state, "suppress_blind_throw_after_ambiguous_pack_open")
+                    if self.battle_capture_fallback_cycles >= 2 or battle_fallback_no_progress or ambiguous_capture_after_open_pack:
+                        sequence = missing_menu_fight_sequence_for_state(state)
+                        if self.trainer_missing_menu_fight_index >= len(sequence):
+                            self.trainer_missing_menu_fight_index = 0
+                        action = sequence[self.trainer_missing_menu_fight_index]
+                        return [action], {
+                            "path_source": "battle_fallback",
+                            "battle_policy": "capture_abandoned_to_fight_missing_menu_sequence",
+                            "controller": "fight",
+                            "controller_state": "fallback_capture_abandoned_to_fight_sequence",
+                            "next_step": action,
+                            "planned_path_length": len(sequence) - self.trainer_missing_menu_fight_index,
+                            "battle_sequence_index": self.trainer_missing_menu_fight_index,
+                            "capture_fallback_cycles": self.battle_capture_fallback_cycles,
+                            "battle_no_progress_count": self.battle_no_progress_count,
+                            "forced_capture": force_capture,
+                            "forced_capture_exhausted": forced_capture_exhausted,
+                            "move_slot": preferred_move_slot(state),
+                            "move_pp": list(lead_move_pps(state)),
+                            "target_species": catch_decision.target_species,
+                            "reason": "capture fallback reached ambiguous menu state after opening Pack; suppressing blind throw to avoid selecting PKMN" if ambiguous_capture_after_open_pack else ("capture fallback exhausted bounded blind ball attempts; forcing Fight to end the wild battle instead of looping" if forced_capture_exhausted else "capture fallback made no semantic progress; forcing Fight to end the wild battle instead of looping"),
+                            "blocked_reason": menu_blocked_reason(state),
+                            "capture_safety": list(self.capture_safety_events),
+                        } | self.blocked_edge_status()
+                    if force_capture and (self.battle_capture_fallback_cycles >= 2 or battle_fallback_no_progress):
+                        self.trainer_missing_menu_fight_index = 0
+                        self.battle_no_progress_count = 0
+                        if self.battle_capture_sequence_index >= len(BATTLE_CAPTURE_OPEN_PACK_SEQUENCE) and self.battle_capture_throw_sequence_index >= len(BATTLE_CAPTURE_THROW_BALL_SEQUENCE):
+                            self.battle_capture_sequence_index = 0
+                            self.battle_capture_throw_sequence_index = 0
+                    if self.battle_capture_sequence_index >= len(BATTLE_CAPTURE_OPEN_PACK_SEQUENCE):
+                        if self.battle_capture_throw_sequence_index >= len(BATTLE_CAPTURE_THROW_BALL_SEQUENCE):
+                            self.battle_capture_fallback_cycles += 1
+                            self.battle_capture_sequence_index = 0
+                            self.battle_capture_throw_sequence_index = 0
+                        action = BATTLE_CAPTURE_THROW_BALL_SEQUENCE[self.battle_capture_throw_sequence_index]
+                        return [action], {
+                            "path_source": "battle_fallback",
+                            "battle_policy": "capture_missing_menu_throw_ball_sequence",
+                            "controller": "capture",
+                            "controller_state": "fallback_capture_throw_ball_sequence",
+                            "next_step": action,
+                            "planned_path_length": len(BATTLE_CAPTURE_THROW_BALL_SEQUENCE) - self.battle_capture_throw_sequence_index,
+                            "battle_capture_sequence_index": self.battle_capture_sequence_index,
+                            "battle_capture_throw_sequence_index": self.battle_capture_throw_sequence_index,
+                            "capture_intent": "throw_ball",
+                            "target_species": catch_decision.target_species,
+                            "reason": "Pack was opened but menu RAM is unavailable; using bounded Balls-pocket throw sequence from verified balls inventory",
+                            "blocked_reason": menu_blocked_reason(state),
+                            "capture_safety": list(self.capture_safety_events),
+                        } | self.blocked_edge_status()
+                    action = BATTLE_CAPTURE_OPEN_PACK_SEQUENCE[self.battle_capture_sequence_index]
+                    return [action], {
+                        "path_source": "battle_fallback",
+                        "battle_policy": "capture_missing_menu_open_pack_sequence",
+                        "controller": "capture",
+                        "controller_state": "fallback_capture_open_pack_sequence",
+                        "next_step": action,
+                        "planned_path_length": len(BATTLE_CAPTURE_OPEN_PACK_SEQUENCE) - self.battle_capture_sequence_index,
+                        "battle_capture_sequence_index": self.battle_capture_sequence_index,
+                        "capture_intent": "throw_ball",
+                        "target_species": catch_decision.target_species,
+                        "reason": catch_decision.reason,
+                        "blocked_reason": menu_blocked_reason(state),
+                        "capture_safety": list(self.capture_safety_events),
+                    } | self.blocked_edge_status()
+                if catch_decision.action == "weaken":
+                    sequence = missing_menu_fight_sequence_for_state(state)
+                    if self.trainer_missing_menu_fight_index >= len(sequence):
+                        self.trainer_missing_menu_fight_index = 0
+                    action = sequence[self.trainer_missing_menu_fight_index]
+                    return [action], {
+                        "path_source": "battle_fallback",
+                        "battle_policy": "wild_weaken_missing_menu_sequence",
+                        "controller": "fight",
+                        "controller_state": "fallback_wild_weaken_missing_menu_sequence",
+                        "next_step": action,
+                        "planned_path_length": len(sequence) - self.trainer_missing_menu_fight_index,
+                        "battle_sequence_index": self.trainer_missing_menu_fight_index,
+                        "move_slot": preferred_move_slot(state),
+                        "move_pp": list(lead_move_pps(state)),
+                        "target_species": catch_decision.target_species,
+                        "reason": catch_decision.reason,
+                        "blocked_reason": menu_blocked_reason(state),
+                    } | self.blocked_edge_status()
             if likely_wild_grind_missing_menu(state):
-                if self.trainer_missing_menu_fight_index >= len(TRAINER_MISSING_MENU_FIGHT_SEQUENCE):
+                sequence = missing_menu_fight_sequence_for_state(state)
+                if self.trainer_missing_menu_fight_index >= len(sequence):
                     self.trainer_missing_menu_fight_index = 0
-                action = TRAINER_MISSING_MENU_FIGHT_SEQUENCE[self.trainer_missing_menu_fight_index]
+                action = sequence[self.trainer_missing_menu_fight_index]
                 return [action], {
                     "path_source": "battle_fallback",
                     "battle_policy": "wild_grind_missing_menu_sequence",
                     "controller": "fight",
                     "controller_state": "fallback_wild_grind_missing_menu_sequence",
                     "next_step": action,
-                    "planned_path_length": len(TRAINER_MISSING_MENU_FIGHT_SEQUENCE) - self.trainer_missing_menu_fight_index,
+                    "planned_path_length": len(sequence) - self.trainer_missing_menu_fight_index,
                     "battle_sequence_index": self.trainer_missing_menu_fight_index,
+                    "move_slot": preferred_move_slot(state),
+                    "move_pp": list(lead_move_pps(state)),
                     "reason": "wild battle menu RAM unavailable during pre-Falkner grind; backing out and forcing Fight/first move",
                     "blocked_reason": menu_blocked_reason(state),
                 }
@@ -1763,31 +2516,141 @@ class GoldAutoplayerV2:
                     "reason": "battle menu RAM unavailable; using observed wild battle main-menu run sequence",
                 }
             return choose_battle_actions(state)
+        if all_party_fainted(state):
+            return ["press_a"], {
+                "path_source": "blackout_recovery",
+                "next_step": "press_a",
+                "planned_path_length": 1,
+                "reason": "all party members fainted; advance loss/blackout text instead of navigating",
+            } | self.blocked_edge_status()
         self.battle_run_sequence_index = 0
+        self.battle_capture_sequence_index = 0
+        self.battle_capture_throw_sequence_index = 0
+        self.battle_capture_fallback_cycles = 0
         self.trainer_missing_menu_fight_index = 0
         self.trainer_missing_menu_heal_index = 0
         self.trainer_missing_menu_heal_cycles = 0
+        starter_selection = self.learning.get("starter_selection")
+        if (
+            snapshot.has_starter
+            and isinstance(starter_selection, dict)
+            and (starter_selection.get("active_choice") is not None or starter_selection.get("active_nickname") is not None)
+            and not likely_starter_nickname_screen(state)
+        ):
+            self.finalize_starter_selection()
         if likely_mart_purchase_screen(state):
-            if self.mart_buy_sequence_index >= len(MART_BUY_ONE_SEQUENCE):
+            sequence = mart_purchase_sequence(state)
+            policy = mart_purchase_policy(state) or "balls"
+            if self.mart_buy_sequence_index >= len(sequence):
                 self.mart_buy_sequence_index = 0
-            action = MART_BUY_ONE_SEQUENCE[self.mart_buy_sequence_index]
+                return ["press_b"], {
+                    "path_source": "mart_purchase_unverified_reopen",
+                    "next_step": "press_b",
+                    "planned_path_length": 1,
+                    "mart_purchase_policy": policy,
+                    "reason": "completed buy sequence without verified inventory change; back out before retrying",
+                } | self.blocked_edge_status()
+            if sequence == ("press_b",):
+                self.mart_buy_sequence_index = 0
+            action = sequence[self.mart_buy_sequence_index]
             return [action], {
-                "path_source": "mart_buy_balls",
+                "path_source": "mart_buy_potions" if policy == "potions" else "mart_buy_balls",
                 "next_step": action,
-                "planned_path_length": len(MART_BUY_ONE_SEQUENCE) - self.mart_buy_sequence_index,
+                "planned_path_length": len(sequence) - self.mart_buy_sequence_index,
                 "mart_buy_sequence_index": self.mart_buy_sequence_index,
-                "reason": "buying Poke Balls before grinding/capture",
+                "mart_purchase_policy": policy,
+                "reason": "buying Potions before grinding/Falkner" if policy == "potions" else "buying Poke Balls before grinding/capture while reserving Potion money",
             } | self.blocked_edge_status()
-        if confirmed_dialogue(dialog) or visual_dialogue_active(state):
+        aide_stale_visual_dialogue = (
+            select_route_target(state) == VIOLET_POKECENTER_AIDE_TARGET
+            and visual_dialogue_active(state)
+            and dialog.get("window_stack_plausible") is False
+            and self.button_failure_count >= 4
+        )
+        if (confirmed_dialogue(dialog) or visual_dialogue_active(state)) and not aide_stale_visual_dialogue:
+            same_state_press_a_count = self.repeated_press_a_same_state_count(state)
+            map_info = state.get("map") or {}
+            if map_info.get("map_group") == 0 and map_info.get("map_number") == 0:
+                self.button_failure_count = 0
+                return ["press_a"], {
+                    "path_source": "new_game_bootstrap_dialogue",
+                    "next_step": "press_a",
+                    "planned_path_length": 1,
+                    "same_state_press_a_count": same_state_press_a_count,
+                    "reason": "pre-overworld intro text can leave RAM state unchanged while dialogue advances",
+                } | self.blocked_edge_status()
+            if not snapshot.has_starter and snapshot.position.map_key in {(24, 4), (24, 5), (24, 6), (24, 7)}:
+                self.button_failure_count = 0
+                return ["press_a"], {
+                    "path_source": "fresh_run_intro_dialogue",
+                    "next_step": "press_a",
+                    "planned_path_length": 1,
+                    "same_state_press_a_count": same_state_press_a_count,
+                    "reason": "early setup and Elm dialogue can keep RAM unchanged while text advances",
+                } | self.blocked_edge_status()
+            if select_route_target(state) == VIOLET_POKECENTER_AIDE_TARGET and visual_dialogue_active(state) and dialog.get("window_stack_plausible") is False and self.button_failure_count >= 1:
+                if self.stale_dialogue_recovery_index >= len(AIDE_NURSE_DIALOGUE_ESCAPE_SEQUENCE):
+                    self.stale_dialogue_recovery_index = 0
+                action = AIDE_NURSE_DIALOGUE_ESCAPE_SEQUENCE[self.stale_dialogue_recovery_index]
+                self.stale_dialogue_recovery_index += 1
+                return [action], {
+                    "path_source": "pokecenter_aide_stale_visual_escape",
+                    "next_step": action,
+                    "planned_path_length": len(AIDE_NURSE_DIALOGUE_ESCAPE_SEQUENCE) - self.stale_dialogue_recovery_index + 1,
+                    "dialogue_recovery_index": self.stale_dialogue_recovery_index - 1,
+                    "same_state_press_a_count": same_state_press_a_count,
+                    "reason": "clear implausible visual textbox before moving to Elm's aide",
+                } | self.blocked_edge_status()
+            if select_route_target(state) == VIOLET_POKECENTER_AIDE_TARGET and same_state_press_a_count < 8 and self.button_failure_count == 0:
+                self.button_failure_count = 0
+                return ["press_a"], {
+                    "path_source": "pokecenter_aide_dialogue",
+                    "next_step": "press_a",
+                    "planned_path_length": 1,
+                    "same_state_press_a_count": same_state_press_a_count,
+                    "reason": "advance open Pokemon Center text before moving to Elm's aide",
+                } | self.blocked_edge_status()
+            if select_route_target(state) == VIOLET_POKECENTER_AIDE_TARGET and snapshot.position.tile in VIOLET_POKECENTER_HEAL_TARGET.tiles:
+                if self.stale_dialogue_recovery_index >= len(AIDE_NURSE_DIALOGUE_ESCAPE_SEQUENCE):
+                    self.stale_dialogue_recovery_index = 0
+                action = AIDE_NURSE_DIALOGUE_ESCAPE_SEQUENCE[self.stale_dialogue_recovery_index]
+                self.stale_dialogue_recovery_index += 1
+                return [action], {
+                    "path_source": "pokecenter_aide_nurse_dialogue_escape",
+                    "next_step": action,
+                    "planned_path_length": len(AIDE_NURSE_DIALOGUE_ESCAPE_SEQUENCE) - self.stale_dialogue_recovery_index + 1,
+                    "dialogue_recovery_index": self.stale_dialogue_recovery_index - 1,
+                    "same_state_press_a_count": same_state_press_a_count,
+                    "reason": "decline nurse prompt before moving to Elm's aide",
+                } | self.blocked_edge_status()
+            if active_pokecenter_heal_dialogue(state) and same_state_press_a_count < 8:
+                self.button_failure_count = 0
+                return ["press_a"], {
+                    "path_source": "pokecenter_heal_dialogue",
+                    "next_step": "press_a",
+                    "planned_path_length": 1,
+                    "same_state_press_a_count": same_state_press_a_count,
+                    "reason": "low-HP nurse interaction must be advanced before stale-dialogue escape",
+                } | self.blocked_edge_status()
+            if same_state_press_a_count >= STUCK_CIRCUIT_BREAKER_THRESHOLD:
+                action, status = self.stale_dialogue_recovery_action(state)
+                return [action], status | self.blocked_edge_status()
             self.button_failure_count = 0
             return ["press_a"], {"path_source": "dialogue", "next_step": "press_a", "planned_path_length": 1}
+        self.reset_recovery_after_manual_progress(state)
         if ambiguous_dialogue(dialog):
-            return [], {
-                "path_source": "ambiguous_dialogue",
-                "next_step": None,
-                "planned_path_length": None,
+            if self.ambiguous_dialogue_index >= len(AMBIGUOUS_DIALOGUE_RECOVERY_SEQUENCE):
+                self.ambiguous_dialogue_index = 0
+            action = AMBIGUOUS_DIALOGUE_RECOVERY_SEQUENCE[self.ambiguous_dialogue_index]
+            self.ambiguous_dialogue_index += 1
+            return [action], {
+                "path_source": "ambiguous_dialogue_recovery",
+                "next_step": action,
+                "planned_path_length": len(AMBIGUOUS_DIALOGUE_RECOVERY_SEQUENCE) - self.ambiguous_dialogue_index + 1,
                 "dialogue_reason": "window_stack_implausible",
-            }
+                "recovery_reason": "bounded resume probe for ambiguous text/menu state",
+                "ambiguous_dialogue_index": self.ambiguous_dialogue_index - 1,
+            } | self.blocked_edge_status()
         if self.button_failure_count >= STUCK_CIRCUIT_BREAKER_THRESHOLD:
             if self.adaptive_mode:
                 action = self.choose_adaptive_button_recovery_action()
@@ -1831,6 +2694,16 @@ class GoldAutoplayerV2:
                 } | self.blocked_edge_status()
             source = "missing_position"
             return [], {"path_source": source, "next_step": None, "planned_path_length": None} | self.blocked_edge_status()
+        aliased_state = union_cave_live_alias_state(state, key)
+        if aliased_state is not None:
+            state = aliased_state
+            snapshot = snapshot_from_state(state)
+            key = snapshot.position.map_key
+            tile = snapshot.position.tile
+        ruins_escape = ruins_of_alph_escape_action(state, key)
+        if ruins_escape is not None:
+            action, status = ruins_escape
+            return [action], status | self.blocked_edge_status()
         tile, coordinate_status = effective_navigation_tile(state, key, tile)
         if tile is None:
             return [], {"path_source": "missing_position", "next_step": None, "planned_path_length": None} | self.blocked_edge_status()
@@ -1841,6 +2714,25 @@ class GoldAutoplayerV2:
                 "planned_path_length": 1,
             } | self.blocked_edge_status()
         if likely_text_input_keyboard(state):
+            if likely_starter_nickname_screen(state):
+                sequence = self.starter_nickname_sequence()
+                if self.nickname_sequence_index >= len(sequence):
+                    return [], {
+                        "path_source": "text_input_keyboard_blocked_after_nickname_sequence",
+                        "next_step": None,
+                        "planned_path_length": None,
+                        "nickname": self.active_starter_nickname,
+                        "reason": "nickname sequence completed but keyboard still appears active; refusing to type more",
+                    } | self.blocked_edge_status()
+                action = sequence[self.nickname_sequence_index]
+                return [action], {
+                    "path_source": "starter_nickname_entry",
+                    "next_step": action,
+                    "planned_path_length": len(sequence) - self.nickname_sequence_index,
+                    "text_input_sequence_index": self.nickname_sequence_index,
+                    "nickname": self.active_starter_nickname,
+                    "reason": "entering rotating silly starter nickname without keyboard OCR",
+                } | self.blocked_edge_status()
             if self.nickname_sequence_index >= len(TEXT_INPUT_END_SEQUENCE):
                 self.nickname_sequence_index = 0
             action = TEXT_INPUT_END_SEQUENCE[self.nickname_sequence_index]
@@ -1888,6 +2780,13 @@ class GoldAutoplayerV2:
             actions, status = self.choose_safe_exploratory_action(key, tile, fallback_from="no_goal")
             status.update(coordinate_status)
             return actions, status
+        if target == VIOLET_POKECENTER_HEAL_TARGET and self.suppress_repeated_pokecenter_heal(snapshot):
+            target = self.target_after_pokecenter_heal_attempt(snapshot)
+            coordinate_status.update({
+                "pokecenter_heal_suppressed": True,
+                "suppressed_target": "Violet Pokemon Center nurse counter",
+                "suppression_reason": "already completed one nurse interaction for the current lead HP snapshot",
+            })
         if target == VIOLET_MART_BUY_TARGET and key == VIOLET_MART_BUY_TARGET.map_key and tile in VIOLET_MART_BUY_TARGET.tiles:
             action = "press_a" if self.mart_face_left_attempted_at == tile else "walk_left"
             return [action], {
@@ -1906,6 +2805,37 @@ class GoldAutoplayerV2:
                 "grind_sequence_index": self.grind_sequence_index,
                 "reason": "seek wild encounters for training/capture before Falkner",
             } | self.blocked_edge_status()
+        if target == STARTER_TARGET and key == STARTER_TARGET.map_key and not snapshot.has_starter:
+            live_tile = snapshot.position.tile
+            if live_tile is not None:
+                x, y = live_tile
+                selected_choice = self.active_starter_choice or self.resolve_starter_choice()
+                selected_target = STARTER_CHOICES.get(selected_choice, STARTER_TARGET)
+                target_x, target_y = next(iter(selected_target.tiles))
+                if y > target_y:
+                    action = "walk_up"
+                elif y < target_y:
+                    action = "walk_down"
+                elif x < target_x:
+                    action = "walk_right"
+                elif x > target_x:
+                    action = "walk_left"
+                else:
+                    action = "press_a" if self.starter_face_up_attempted_at == live_tile else "walk_up"
+                return [action], {
+                    "path_source": "starter_live_macro",
+                    "next_step": action,
+                    "planned_path_length": abs(x - target_x) + abs(y - target_y) + (0 if live_tile == (target_x, target_y) else 1),
+                    "reason": "starter selection uses live normalized coordinates; static collision/raw fallback is unreliable in Elm's Lab",
+                    "starter_choice": selected_choice,
+                    "starter_nickname": self.active_starter_nickname,
+                    "target": {
+                        "map_group": selected_target.map_key[0],
+                        "map_number": selected_target.map_key[1],
+                        "name": selected_target.name,
+                        "tiles": [{"x": tx, "y": ty} for tx, ty in sorted(selected_target.tiles)],
+                    },
+                } | self.blocked_edge_status()
         if target == VIOLET_GATE_TARGET and key == (26, 2):
             if tile == (4, 6):
                 return ["walk_down"], {
@@ -1928,6 +2858,42 @@ class GoldAutoplayerV2:
                 "next_step": action,
                 "planned_path_length": 1,
                 "reason": "lead_hp_low_before_zephyr",
+            } | self.blocked_edge_status()
+        if target == VIOLET_POKECENTER_AIDE_TARGET and key == VIOLET_POKECENTER_AIDE_TARGET.map_key:
+            if tile == (3, 3):
+                action = "walk_down"
+            elif tile == (3, 4):
+                action = "walk_right"
+            elif tile in {(4, 5), (4, 6)}:
+                action = "walk_up"
+            elif tile == (4, 4):
+                action = "press_a" if self.pokecenter_aide_face_up_attempted_at == tile else "walk_up"
+            elif tile[0] > 4:
+                action = "walk_left"
+            elif tile[0] < 4:
+                action = "walk_right"
+            elif tile[1] > 4:
+                action = "walk_up"
+            elif tile[1] < 4:
+                action = "walk_down"
+            else:
+                action = None
+            if action is None:
+                pass
+            else:
+                return [action], {
+                    "path_source": "pokecenter_aide_interact",
+                    "next_step": action,
+                    "planned_path_length": 1,
+                    "reason": "collect Egg from Elm's aide before Route 32 guard",
+                } | self.blocked_edge_status()
+        if target == VIOLET_POKECENTER_AIDE_TARGET and key == VIOLET_POKECENTER_AIDE_TARGET.map_key and tile in VIOLET_POKECENTER_AIDE_TARGET.tiles:
+            action = "press_a" if self.pokecenter_aide_face_up_attempted_at == tile else "walk_up"
+            return [action], {
+                "path_source": "pokecenter_aide_interact",
+                "next_step": action,
+                "planned_path_length": 1,
+                "reason": "collect Egg from Elm's aide before Route 32 guard",
             } | self.blocked_edge_status()
         if GOLD_MAP_REGISTRY.get(key) is None or GOLD_MAP_REGISTRY.get(target.map_key) is None:
             return [], diagnose_route_failure(key, tile, target)
@@ -2075,8 +3041,8 @@ class GoldAutoplayerV2:
                     "selected": True,
                     "score": 100,
                     "expected_outcome": "survive battle and improve resources/progress",
-                    "blockers": [],
-                    "evidence": [navigation_update.get("reason") or catch_decision.reason],
+                    "blockers": [item for item in [navigation_update.get("blocked_reason"), "capture_safety_active" if navigation_update.get("capture_safety") else None] if item],
+                    "evidence": [navigation_update.get("reason") or catch_decision.reason, navigation_update.get("controller_state"), navigation_update.get("next_step")],
                 })
             elif resources.get("broke_no_balls") and story_decision.objective_key == "route31_grind":
                 policy_candidates.append({
@@ -2127,6 +3093,13 @@ class GoldAutoplayerV2:
                     "action": catch_decision.action,
                     "reason": catch_decision.reason,
                     "target_species": catch_decision.target_species,
+                },
+                "decision_context": {
+                    "blocked_edges": self.blocked_edge_status(),
+                    "battle_identity": self.last_battle_identity,
+                    "battle_identity_change": self.last_battle_identity_change,
+                    "capture_safety": list(self.capture_safety_events),
+                    "menu_blocked_reason": menu_blocked_reason(state),
                 },
                 "ram_health": ram_health_from_state(state),
                 "story": {
@@ -2266,11 +3239,25 @@ class GoldAutoplayerV2:
         try:
             state = self.request_json("/state")
             self.record_api_success()
+            self.sync_battle_identity(state)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             state = None
             self.record_api_failure(sys.exc_info()[1])
 
         status = self.build_status(control, state)
+        if state is not None:
+            try:
+                self.save_state_manager.dry_run = self.milestone_save_state_dry_run_default or control.get("dry_run") is not False
+                status["save_states"] = self.save_state_manager.maybe_save(state, status, max_saves=1)
+            except Exception as exc:  # noqa: BLE001 - save snapshots must never block gameplay
+                status["save_states"] = {
+                    "enabled": True,
+                    "dry_run": self.save_state_manager.dry_run,
+                    "safety": "save_only",
+                    "load_policy": "manual_only",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                self.log_event({"event": "save_state_milestone_error", "error": status["save_states"]["error"]})
         if state is None:
             status["phase"] = "API_UNAVAILABLE"
             status["navigation"]["path_source"] = "api_unavailable"
@@ -2288,19 +3275,26 @@ class GoldAutoplayerV2:
                 elif control.get("allow_battle_actions") is not True and (state.get("battle") or {}).get("in_battle"):
                     self.record_action_outcome(action, False, "battle_actions_disabled", "blocked_by_control", state)
                 else:
-                    posted_actions = posted_actions_for_context(action, status.get("navigation"), status.get("phase"))
-                    status["navigation"]["posted_actions"] = posted_actions
-                    result = self.post_actions(posted_actions)
-                    if result.get("success") is False:
-                        self.record_action_outcome(action, False, "post_actions_unsuccessful", "post_failed", state)
+                    readiness_ok, readiness_reason = readiness_allows_action(status, action)
+                    if not readiness_ok:
+                        self.record_action_outcome(action, False, f"readiness_blocked:{readiness_reason}", "blocked_by_readiness", state)
+                        status["actions"] = []
+                        status["navigation"]["blocked_reason"] = "readiness_blocked"
+                        status["navigation"]["readiness_blockers"] = (status.get("readiness") or {}).get("blockers")
                     else:
-                        after_state = self.request_json("/state")
-                        verified, reason = verify_single_action(state, after_state, action)
-                        self.record_action_outcome(action, verified, reason, "ok", state)
-                        self.record_battle_semantic_progress(state, after_state, action, status.get("navigation"))
-                        reward = self.record_learning_transition(action, verified, reason, "ok", state, after_state)
-                        status["learning"] = self.learning_summary() | {"last_reward": reward}
-                if self.last_step_result in {"dry_run", "blocked_by_control", "blocked_invalid_action", "post_failed"}:
+                        posted_actions = posted_actions_for_context(action, status.get("navigation"), status.get("phase"))
+                        status["navigation"]["posted_actions"] = posted_actions
+                        result = self.post_actions(posted_actions)
+                        if result.get("success") is False:
+                            self.record_action_outcome(action, False, "post_actions_unsuccessful", "post_failed", state)
+                        else:
+                            after_state = self.request_json("/state")
+                            verified, reason = verify_single_action(state, after_state, action)
+                            self.record_action_outcome(action, verified, reason, "ok", state)
+                            self.record_battle_semantic_progress(state, after_state, action, status.get("navigation"))
+                            reward = self.record_learning_transition(action, verified, reason, "ok", state, after_state)
+                            status["learning"] = self.learning_summary() | {"last_reward": reward}
+                if self.last_step_result in {"dry_run", "blocked_by_control", "blocked_by_readiness", "blocked_invalid_action", "post_failed"}:
                     reward = self.record_learning_transition(action, False, self.verification_reason or "not_posted", self.last_step_result or "blocked", state, None)
                     status["learning"] = self.learning_summary() | {"last_reward": reward}
                 status["navigation"]["last_step_result"] = self.last_step_result

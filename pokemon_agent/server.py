@@ -48,6 +48,7 @@ class ActionRequest(BaseModel):
 class SaveRequest(BaseModel):
     """Body for POST /save and POST /load."""
     name: str
+    overwrite: bool = False
 
 
 class RunRequest(BaseModel):
@@ -1492,10 +1493,14 @@ async def save_state(req: SaveRequest):
         saves_dir.mkdir(parents=True, exist_ok=True)
         save_name = _safe_save_name(req.name)
         save_path = saves_dir / f"{save_name}.state"
+        if save_path.exists() and not req.overwrite:
+            raise HTTPException(status_code=409, detail=f"Save already exists: {save_name}")
         await _run_sync(_emulator.save_state, str(save_path))
         state_after = await _run_sync(_get_state_dict)
         await broadcast({"type": "key_moment", "description": f"Saved state: {save_name}", "state": state_after})
         return {"success": True, "name": save_name, "path": str(save_path), "state_after": state_after}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Save error: {e}")
 

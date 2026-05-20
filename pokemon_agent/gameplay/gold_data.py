@@ -37,8 +37,8 @@ SPECIES_NAMES: dict[int, str] = {
 
 ITEM_NAMES: dict[int, str] = {
     0x02: "Ultra Ball",
-    0x03: "Great Ball",
-    0x04: "Poke Ball",
+    0x04: "Great Ball",
+    0x05: "Poke Ball",
     0x12: "Potion",
     0x13: "Antidote",
     0x14: "Burn Heal",
@@ -50,7 +50,7 @@ ITEM_NAMES: dict[int, str] = {
     0x22: "Repel",
 }
 
-BALL_ITEM_IDS: frozenset[int] = frozenset({0x02, 0x03, 0x04})
+BALL_ITEM_IDS: frozenset[int] = frozenset({0x02, 0x04, 0x05})
 HEALING_ITEM_IDS: frozenset[int] = frozenset({0x12, 0x18})
 STATUS_HEAL_ITEM_IDS: frozenset[int] = frozenset({0x13, 0x14, 0x15, 0x16, 0x17})
 DANGEROUS_ENEMY_MOVE_IDS: frozenset[int] = frozenset({18, 46, 120, 153})

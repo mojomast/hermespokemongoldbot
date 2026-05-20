@@ -44,6 +44,18 @@ MAX_PLAUSIBLE_PARTY_COUNT = 6
 MAX_PLAUSIBLE_BAG_COUNT = 20
 MAX_PLAUSIBLE_BALL_COUNT = 12
 
+# pokegold WRAM symbols (bank 1, exposed through PyBoy's flat WRAM view):
+#   wMoney     = $D573, 3-byte BCD
+#   wNumItems  = $D5B7; wItems = $D5B8, MAX_ITEMS * 2 + terminator
+#   wNumBalls  = $D5FC; wBalls = $D5FD, MAX_BALLS * 2 + terminator
+# A previous decoder used $D5F7 for the Balls pocket, which is inside the
+# Key Items pocket and therefore confidently reported zero balls on live Gold.
+ADDR_MONEY = 0xD573
+ADDR_NUM_ITEMS = 0xD5B7
+ADDR_ITEMS = 0xD5B8
+ADDR_NUM_BALLS = 0xD5FC
+ADDR_BALLS = 0xD5FD
+
 BATTLE_TYPE_NAMES = {
     0x00: "none",
     0x01: "wild",
@@ -91,8 +103,15 @@ class PokemonGoldReader(GameMemoryReader):
     def _u16le(self, addr: int) -> int:
         return self._u8(addr) | (self._u8(addr + 1) << 8)
 
+    def _bcd_bytes_valid(self, addr: int, num_bytes: int) -> bool:
+        raw = self.emu.read_range(addr, num_bytes)
+        return all(((b >> 4) & 0x0F) <= 9 and (b & 0x0F) <= 9 for b in raw)
+
     def _money(self) -> int:
-        return self.read_bcd(0xD573, 3)
+        return self.read_bcd(ADDR_MONEY, 3)
+
+    def _money_raw(self) -> list[int]:
+        return list(self.emu.read_range(ADDR_MONEY, 3))
 
     def _badges(self) -> list[str]:
         out: list[str] = []
@@ -207,6 +226,9 @@ class PokemonGoldReader(GameMemoryReader):
         return {
             "name": None,
             "money": self._money(),
+            "money_raw_bcd": self._money_raw(),
+            "money_trusted": self._bcd_bytes_valid(ADDR_MONEY, 3),
+            "money_source": "pokegold_wMoney_d573_3byte_bcd",
             "badges": self._badges(),
             "badge_count": len(self._badges()),
             "position": {
@@ -265,15 +287,15 @@ class PokemonGoldReader(GameMemoryReader):
         return party
 
     def read_bag(self) -> List[Dict[str, Any]]:
-        count_raw = self._u8(0xD5B7)
+        count_raw = self._u8(ADDR_NUM_ITEMS)
         if count_raw > MAX_PLAUSIBLE_BAG_COUNT:
             items: list[dict[str, Any]] = []
         else:
             count = count_raw
             items = []
             for i in range(count):
-                item_id = self._u8(0xD5B8 + i * 2)
-                qty = self._u8(0xD5B9 + i * 2)
+                item_id = self._u8(ADDR_ITEMS + i * 2)
+                qty = self._u8(ADDR_ITEMS + i * 2 + 1)
                 if item_id in (0x00, 0xFF):
                     continue
                 items.append({
@@ -288,13 +310,13 @@ class PokemonGoldReader(GameMemoryReader):
         return items
 
     def read_ball_pocket(self) -> List[Dict[str, Any]]:
-        count_raw = self._u8(0xD5F7)
+        count_raw = self._u8(ADDR_NUM_BALLS)
         if count_raw > MAX_PLAUSIBLE_BALL_COUNT:
             return []
         items: list[dict[str, Any]] = []
         for i in range(count_raw):
-            item_id = self._u8(0xD5F8 + i * 2)
-            qty = self._u8(0xD5F9 + i * 2)
+            item_id = self._u8(ADDR_BALLS + i * 2)
+            qty = self._u8(ADDR_BALLS + i * 2 + 1)
             if item_id in (0x00, 0xFF):
                 continue
             items.append({
@@ -458,11 +480,15 @@ class PokemonGoldReader(GameMemoryReader):
         party_count = party_count_raw if party_count_raw <= MAX_PLAUSIBLE_PARTY_COUNT else 0
         species = [self._u8(0xDA23 + i) for i in range(party_count)]
         party_terminator = self._u8(0xDA23 + party_count) if party_count_raw <= MAX_PLAUSIBLE_PARTY_COUNT else None
-        bag_count_raw = self._u8(0xD5B7)
+        bag_count_raw = self._u8(ADDR_NUM_ITEMS)
         bag_count = bag_count_raw if bag_count_raw <= MAX_PLAUSIBLE_BAG_COUNT else 0
-        bag_terminator = self._u8(0xD5B8 + bag_count * 2) if bag_count_raw <= MAX_PLAUSIBLE_BAG_COUNT else None
+        bag_terminator = self._u8(ADDR_ITEMS + bag_count * 2) if bag_count_raw <= MAX_PLAUSIBLE_BAG_COUNT else None
+        balls_count_raw = self._u8(ADDR_NUM_BALLS)
+        balls_count = balls_count_raw if balls_count_raw <= MAX_PLAUSIBLE_BALL_COUNT else 0
+        balls_terminator = self._u8(ADDR_BALLS + balls_count * 2) if balls_count_raw <= MAX_PLAUSIBLE_BALL_COUNT else None
         party_count_trusted = party_count_raw <= MAX_PLAUSIBLE_PARTY_COUNT
         bag_count_trusted = bag_count_raw <= MAX_PLAUSIBLE_BAG_COUNT
+        balls_count_trusted = balls_count_raw <= MAX_PLAUSIBLE_BALL_COUNT
         story_events = self._story_event_flags()
         party_has_starter = any(s in {0x98, 0x9B, 0x9E} for s in species)
         return {
@@ -478,6 +504,13 @@ class PokemonGoldReader(GameMemoryReader):
             "bag_count_trusted": bag_count_trusted,
             "bag_terminator": bag_terminator,
             "bag_terminator_present": bag_terminator == 0xFF if bag_terminator is not None else False,
+            "balls_count": balls_count,
+            "balls_count_raw": balls_count_raw,
+            "balls_count_trusted": balls_count_trusted,
+            "balls_terminator": balls_terminator,
+            "balls_terminator_present": balls_terminator == 0xFF if balls_terminator is not None else False,
+            "money_raw_bcd": self._money_raw(),
+            "money_trusted": self._bcd_bytes_valid(ADDR_MONEY, 3),
             "has_starter": story_events["got_pokemon_from_elm"] or party_has_starter,
             "johto_badges": self._u8(0xD57C),
             "kanto_badges": self._u8(0xD57D),

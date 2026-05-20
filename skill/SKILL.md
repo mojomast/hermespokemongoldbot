@@ -8,8 +8,9 @@ triggers:
   - start pokemon
   - play pokemon red
   - play pokemon firered
-  - pokemon firered
   - pokemon red
+  - pokemon gold
+  - pokemon silver
   - play gameboy
 ---
 
@@ -28,9 +29,17 @@ pip install pokemon-agent[dashboard] pyboy
 # The agent CANNOT download or distribute ROMs
 ```
 
-Ask the user for the ROM file path if not provided. Common locations:
+Ask the user for the ROM file path if not provided, or start onboarding so the
+user can upload/select their own legally obtained ROM:
+
+```bash
+pokemon-agent onboard --port 9876 --data-dir ~/.pokemon-agent-gold
+```
+
+Common local locations:
+- `~/roms/pokemon_gold.gbc`
+- `~/roms/pokemon_silver.gbc`
 - `~/roms/pokemon_red.gb`
-- `~/pokemon_red.gb`
 
 ## Starting a Game
 
@@ -43,6 +52,11 @@ curl -s http://localhost:8765/health
 ```
 
 Tell the user: "Dashboard available at http://localhost:8765/dashboard"
+
+For this repository's Gold service, the helper/default user service commonly uses
+ports `9876` or `9879` and data dir `~/.pokemon-agent-gold`. ROM switching is
+restart-based and per-ROM learning/saves/runs are isolated under
+`games/<game>-<romhash>`.
 
 ## Gameplay Loop
 
@@ -106,6 +120,10 @@ If stuck (same state after 3+ actions), try:
 2. Try different direction
 3. Load last save
 
+Gold/Silver V2/adaptive already implements bounded resume behavior: blocked-edge
+recovery, adaptive button probes, battle no-progress resume, ambiguous dialogue
+resume, and supervisor handoff between V1 and adaptive when local recovery fails.
+
 ## Action Reference
 
 | Action | What It Does |
@@ -163,25 +181,23 @@ Save before: Gym battles, catching rare Pokémon, entering dungeons.
 
 ## Progression Milestones
 
-Track these in memory as you complete them:
+For Gold/Silver, track these in memory as they complete:
 
-1. ☐ Get starter Pokémon from Oak
-2. ☐ Deliver Oak's Parcel, get Pokédex
-3. ☐ Reach Pewter City through Viridian Forest
-4. ☐ **Boulder Badge** (Brock — Rock type, use Water/Grass)
-5. ☐ Reach Cerulean City via Mt. Moon
-6. ☐ **Cascade Badge** (Misty — Water type, use Grass/Electric)
-7. ☐ Board SS Anne, get HM01 Cut
-8. ☐ **Thunder Badge** (Lt. Surge — Electric, use Ground)
-9. ☐ Clear Rock Tunnel to Lavender Town
-10. ☐ **Rainbow Badge** (Erika — Grass, use Fire/Ice/Flying)
-11. ☐ Clear Team Rocket Hideout, get Silph Scope
-12. ☐ **Soul Badge** (Koga — Poison, use Ground/Psychic)
-13. ☐ **Marsh Badge** (Sabrina — Psychic, use Bug... but good luck in Gen 1)
-14. ☐ **Volcano Badge** (Blaine — Fire, use Water/Ground)
-15. ☐ **Earth Badge** (Giovanni — Ground, use Water/Grass/Ice)
-16. ☐ Victory Road
-17. ☐ Elite Four + Champion
+1. ☐ Choose starter in Elm's Lab
+2. ☐ Reach Cherrygrove City
+3. ☐ Visit Mr. Pokémon and receive Mystery Egg
+4. ☐ Return to Elm and receive Pokédex
+5. ☐ Prepare for Falkner with level/HP/resource gates
+6. ☐ **Zephyr Badge** (Falkner)
+7. ☐ Reach Azalea and clear Slowpoke Well
+8. ☐ **Hive Badge** (Bugsy)
+9. ☐ Reach Goldenrod
+10. ☐ **Plain Badge** (Whitney)
+11. ☐ Continue Johto badges, Elite Four, Kanto badges, Red
+
+Fresh Gold/Silver V2/adaptive runs rotate starters
+`cyndaquil -> totodile -> chikorita` and nicknames `A`, `AA`, `AAA`, `AAAA`,
+`AAAAA` through `gold_autoplayer_v2_learning.json:starter_selection`.
 
 ## Memory Conventions
 

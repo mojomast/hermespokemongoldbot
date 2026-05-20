@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pokemon_agent.gameplay.gold_data import BALL_ITEM_IDS
 from pokemon_agent.gameplay.state_model import snapshot_from_state
 from pokemon_agent.navigation import GOLD_MAP_REGISTRY, RouteTarget, outgoing_transitions, plan_route_to_target
 
@@ -46,9 +47,14 @@ JOHTO_MAIN_OBJECTIVES: tuple[StoryObjective, ...] = (
 
 STARTER_TARGET = RouteTarget(
     map_key=(24, 5),
-    tiles=frozenset({(7, 4)}),
-    name="stand below Totodile's Poke Ball",
+    tiles=frozenset({(5, 5), (6, 5), (7, 5)}),
+    name="stand below a starter Poke Ball",
 )
+STARTER_CHOICES: dict[str, RouteTarget] = {
+    "cyndaquil": RouteTarget((24, 5), frozenset({(5, 5)}), "stand below Cyndaquil's Poke Ball"),
+    "totodile": RouteTarget((24, 5), frozenset({(6, 5)}), "stand below Totodile's Poke Ball"),
+    "chikorita": RouteTarget((24, 5), frozenset({(7, 5)}), "stand below Chikorita's Poke Ball"),
+}
 NEW_BARK_AFTER_STARTER_TARGET = RouteTarget(
     map_key=(24, 4),
     tiles=frozenset({(6, 3)}),
@@ -58,6 +64,11 @@ ROUTE29_TARGET = RouteTarget(
     map_key=(24, 3),
     tiles=frozenset({(59, 8), (59, 9)}),
     name="Route 29 east edge",
+)
+CATCHING_TUTORIAL_TARGET = RouteTarget(
+    map_key=(24, 3),
+    tiles=frozenset({(53, 8), (53, 9)}),
+    name="Route 29 catching tutorial trigger",
 )
 CHERRYGROVE_TARGET = RouteTarget(
     map_key=(26, 3),
@@ -104,6 +115,11 @@ VIOLET_POKECENTER_HEAL_TARGET = RouteTarget(
     tiles=frozenset({(3, 3), (4, 3)}),
     name="Violet Pokemon Center nurse counter",
 )
+VIOLET_POKECENTER_AIDE_TARGET = RouteTarget(
+    map_key=(10, 10),
+    tiles=frozenset({(3, 4), (4, 4)}),
+    name="Elm's aide in Violet Pokemon Center",
+)
 ROUTE31_GRIND_TARGET = RouteTarget(
     map_key=(26, 2),
     tiles=frozenset({(16, 12), (17, 12), (18, 12), (19, 12)}),
@@ -146,8 +162,20 @@ SLOWPOKE_WELL_TARGET = RouteTarget(
 )
 
 FALKNER_PREP_MAPS = frozenset({(10, 5), (10, 6), (10, 7), (10, 10), (26, 11), (26, 2), (26, 1)})
+FALKNER_SUPPLY_MAPS = FALKNER_PREP_MAPS
+FALKNER_HEAL_MAPS = frozenset({(10, 5), (10, 7), (10, 10), (26, 11), (26, 2)})
+FALKNER_CRITICAL_HEAL_MAPS = FALKNER_PREP_MAPS
 FALKNER_MIN_LEVEL = 12
 FALKNER_MIN_HP_RATIO = 0.65
+FALKNER_CRITICAL_HP_RATIO = 0.45
+FALKNER_MIN_PARTY_COUNT = 4
+FALKNER_MIN_BACKUP_LEVEL = 8
+FALKNER_MIN_BALLS = 2
+FALKNER_MIN_HEALING_ITEMS = 1
+FALKNER_MAX_LEVEL_GAP = 5
+POKE_BALL_PRICE = 200
+POTION_PRICE = 300
+FALKNER_MONEY_RESERVE = 300
 
 
 def _effective_story_tile(state: dict[str, Any], key: tuple[int, int] | None, tile: tuple[int, int] | None) -> tuple[int, int] | None:
@@ -202,30 +230,79 @@ def registry_exploration_targets(state: dict[str, Any]) -> tuple[RouteTarget, ..
 def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
     """Explain the next conservative story/navigation target for early Johto."""
     snapshot = snapshot_from_state(state)
+    derived_flags = (state.get("flags") or {}).get("derived_story_flags") if isinstance((state.get("flags") or {}).get("derived_story_flags"), dict) else {}
+    explicit_story_flags = bool(derived_flags)
+    explicit_event_flags_unavailable = explicit_story_flags and derived_flags.get("event_flags_available") is False
     key = snapshot.position.map_key
     lead = snapshot.party[0] if snapshot.party else None
     lead_hp_ratio = lead.hp_ratio if lead is not None else None
     lead_level = lead.level if lead is not None else None
-    balls = sum(item.quantity for item in snapshot.bag if item.item_id in {0x02, 0x03, 0x04})
+    party_count = len(snapshot.party)
+    backup_levels = [mon.level for mon in snapshot.party[1:] if mon.level is not None]
+    min_backup_level = min(backup_levels) if backup_levels else None
+    backups_trained = (
+        len(backup_levels) >= FALKNER_MIN_PARTY_COUNT - 1
+        and min_backup_level is not None
+        and min_backup_level >= FALKNER_MIN_BACKUP_LEVEL
+        and (lead_level is None or lead_level - min_backup_level <= FALKNER_MAX_LEVEL_GAP)
+    )
+    balls = sum(item.quantity for item in snapshot.bag if item.item_id in BALL_ITEM_IDS)
+    healing_items = sum(item.quantity for item in snapshot.bag if item.item_id in {0x12, 0x18})
     money = snapshot.money or 0
+    can_improve_roster = balls > 0 or money >= POKE_BALL_PRICE
+    lead_ready_for_falkner = lead_level is not None and lead_level >= FALKNER_MIN_LEVEL and (lead_hp_ratio is None or lead_hp_ratio >= FALKNER_MIN_HP_RATIO)
     has_zephyr = "Zephyr" in snapshot.badges or snapshot.story.has_zephyr_badge
     falkner_prep_ready = snapshot.story.learned_to_catch_pokemon and snapshot.story.gave_mystery_egg_to_elm
+    falkner_prep_started = snapshot.story.gave_mystery_egg_to_elm or falkner_prep_ready
     needs_heal_before_falkner = (
         lead_hp_ratio is not None
-        and lead_hp_ratio < FALKNER_MIN_HP_RATIO
         and not has_zephyr
-        and falkner_prep_ready
-        and key in {(10, 5), (10, 7), (10, 10), (26, 11), (26, 2)}
+        and falkner_prep_started
+        and (
+            (lead_hp_ratio < FALKNER_MIN_HP_RATIO and key in FALKNER_HEAL_MAPS)
+            or (lead_hp_ratio < FALKNER_CRITICAL_HP_RATIO and key in FALKNER_CRITICAL_HEAL_MAPS)
+        )
     )
     if needs_heal_before_falkner:
         return StoryDecision("violet_heal", "Heal before Falkner", VIOLET_POKECENTER_HEAL_TARGET, "lead_hp_low_before_zephyr")
-    needs_balls_before_grind = balls < 3 and money >= 200 and falkner_prep_ready and not has_zephyr
-    if needs_balls_before_grind and key in {(10, 5), (10, 6), (10, 7), (10, 10), (26, 11), (26, 2)}:
-        return StoryDecision("violet_buy_balls", "Buy Poke Balls in Violet", VIOLET_MART_BUY_TARGET, "need_balls_before_grind_or_capture")
+    needs_catching_tutorial = (
+        snapshot.story.event_flags_available
+        and snapshot.story.gave_mystery_egg_to_elm
+        and not snapshot.story.learned_to_catch_pokemon
+        and not has_zephyr
+    )
+    if needs_catching_tutorial:
+        return StoryDecision(
+            "learn_catching_tutorial",
+            "Complete catching tutorial before buying balls or Falkner prep",
+            CATCHING_TUTORIAL_TARGET,
+            "catching_tutorial_required_before_supply_or_falkner_prep",
+        )
+    missing_heals = max(0, FALKNER_MIN_HEALING_ITEMS - healing_items)
+    needs_balls_before_grind = (
+        balls < FALKNER_MIN_BALLS
+        and falkner_prep_started
+        and not has_zephyr
+        and (money >= POKE_BALL_PRICE + (missing_heals * POTION_PRICE) + FALKNER_MONEY_RESERVE or (balls <= 0 and money >= POKE_BALL_PRICE))
+    )
+    if needs_balls_before_grind and key in FALKNER_SUPPLY_MAPS:
+        return StoryDecision("violet_buy_supplies", "Buy Poke Balls and Potions in Violet", VIOLET_MART_BUY_TARGET, "need_balls_before_grind_or_capture_with_potion_reserve")
+    needs_potions_before_grind = healing_items < FALKNER_MIN_HEALING_ITEMS and money >= POTION_PRICE + FALKNER_MONEY_RESERVE and falkner_prep_started and not has_zephyr
+    if needs_potions_before_grind and key in FALKNER_SUPPLY_MAPS:
+        return StoryDecision("violet_buy_supplies", "Buy Poke Balls and Potions in Violet", VIOLET_MART_BUY_TARGET, "need_potions_before_grind_or_falkner")
+    needs_roster_before_falkner = party_count < FALKNER_MIN_PARTY_COUNT and can_improve_roster and falkner_prep_started and not has_zephyr and key in FALKNER_PREP_MAPS
+    if needs_roster_before_falkner:
+        reason = "need_more_party_members_before_falkner"
+        if balls <= 0 and money < POKE_BALL_PRICE:
+            reason = "need_more_party_members_before_falkner_but_broke_no_balls"
+        return StoryDecision("route31_grind", "Catch and train before Falkner", ROUTE31_GRIND_TARGET, reason)
+    needs_backup_training_before_falkner = party_count >= FALKNER_MIN_PARTY_COUNT and not backups_trained and falkner_prep_started and not has_zephyr and key in FALKNER_PREP_MAPS
+    if needs_backup_training_before_falkner:
+        return StoryDecision("route31_grind", "Train backup Pokemon before Falkner", ROUTE31_GRIND_TARGET, "backup_levels_low_before_falkner")
     needs_grind_before_falkner = (
         lead_level is not None
         and lead_level < FALKNER_MIN_LEVEL
-        and falkner_prep_ready
+        and falkner_prep_started
         and not has_zephyr
         and key in FALKNER_PREP_MAPS
     )
@@ -254,7 +331,7 @@ def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
             return StoryDecision("return_to_elm", "Return Mystery Egg to Elm", ELMS_LAB_RETURN_TARGET, "mystery_egg_obtained_return_through_cherrygrove")
         return StoryDecision("route30", "Enter Route 30", ROUTE30_TARGET, "cherrygrove_to_route30")
     if key == (26, 1):
-        if snapshot.story.event_flags_available and not snapshot.story.got_mystery_egg_from_mr_pokemon:
+        if explicit_event_flags_unavailable or (snapshot.story.event_flags_available and not snapshot.story.got_mystery_egg_from_mr_pokemon):
             return StoryDecision("mr_pokemon", "Visit Mr. Pokemon", MR_POKEMON_HOUSE_TARGET, "starter_obtained_mystery_egg_not_observed")
         if needs_elm_return:
             return StoryDecision("return_to_elm", "Return Mystery Egg to Elm", ELMS_LAB_RETURN_TARGET, "mystery_egg_obtained_not_delivered")
@@ -264,12 +341,17 @@ def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
             return StoryDecision("mr_pokemon", "Visit Mr. Pokemon", MR_POKEMON_HOUSE_TARGET, "inside_mr_pokemon_house_wait_for_egg")
         if needs_elm_return:
             return StoryDecision("return_to_elm", "Return Mystery Egg to Elm", ELMS_LAB_RETURN_TARGET, "mystery_egg_obtained_leave_mr_pokemon")
+    if key in {(26, 2), (26, 11), (10, 5), (10, 7)} and not has_zephyr and not falkner_prep_started and explicit_story_flags:
+        return StoryDecision("route31_grind", "Avoid Falkner until early errands are confirmed", ROUTE31_GRIND_TARGET, "early_story_flags_incomplete_before_falkner")
     if key == (26, 2):
         return StoryDecision("violet_gate", "Enter Violet gate", VIOLET_GATE_TARGET, "route31_to_violet_gate")
     if key == (26, 11):
         return StoryDecision("violet_city", "Reach Violet City", VIOLET_CITY_TARGET, "violet_gate_to_violet_city")
     has_hive = "Hive" in snapshot.badges
     if has_zephyr and not has_hive:
+        needs_egg_from_aide = len(snapshot.party) < 2
+        if needs_egg_from_aide and key in {(10, 1), (10, 5), (10, 7), (10, 10)}:
+            return StoryDecision("violet_get_egg", "Get Egg from Elm's aide", VIOLET_POKECENTER_AIDE_TARGET, "zephyr_observed_route32_guard_requires_egg")
         if key in {(10, 5), (10, 7)}:
             return StoryDecision("route32", "Travel south to Route 32", ROUTE32_TARGET, "zephyr_observed_continue_to_route32")
         if key == (10, 1):
@@ -285,10 +367,14 @@ def explain_story_objective(state: dict[str, Any]) -> StoryDecision:
         if fallback_targets:
             return StoryDecision("registry_exploration", "Explore reachable map transition", fallback_targets[0], "zephyr_badge_observed_registry_exploration", confidence="fallback")
         return StoryDecision("falkner_complete", "Zephyr badge observed", None, "zephyr_badge_observed_objective_complete")
-    if not has_zephyr and falkner_prep_ready and lead_level is not None and lead_level < FALKNER_MIN_LEVEL and key in FALKNER_PREP_MAPS:
+    if not has_zephyr and falkner_prep_started and key in FALKNER_PREP_MAPS and can_improve_roster and (party_count < FALKNER_MIN_PARTY_COUNT or not backups_trained):
+        return StoryDecision("route31_grind", "Catch and train before Falkner", ROUTE31_GRIND_TARGET, "falkner_not_ready_roster_or_backups_low")
+    if not has_zephyr and falkner_prep_started and lead_level is not None and lead_level < FALKNER_MIN_LEVEL and key in FALKNER_PREP_MAPS:
         return StoryDecision("route31_grind", "Train before Falkner", ROUTE31_GRIND_TARGET, "falkner_not_ready_keep_grinding")
-    if not has_zephyr and falkner_prep_ready and lead_hp_ratio is not None and lead_hp_ratio < FALKNER_MIN_HP_RATIO and key in {(10, 5), (10, 7), (10, 10)}:
+    if not has_zephyr and falkner_prep_started and lead_hp_ratio is not None and lead_hp_ratio < FALKNER_MIN_HP_RATIO and key in {(10, 5), (10, 7), (10, 10)}:
         return StoryDecision("violet_heal", "Heal before Falkner", VIOLET_POKECENTER_HEAL_TARGET, "falkner_ready_but_hp_not_safe")
+    if not has_zephyr and falkner_prep_started and not can_improve_roster and lead_ready_for_falkner and key in FALKNER_PREP_MAPS:
+        return StoryDecision("falkner", "Challenge Falkner", FALKNER_TARGET, "lead_ready_roster_blocked_no_balls_or_money")
     if key == (10, 5):
         return StoryDecision("falkner", "Challenge Falkner", FALKNER_TARGET, "violet_city_to_falkner_before_zephyr")
     if key == (10, 7):

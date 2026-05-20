@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hermes Plays Pokémon</title>
-    <link rel="stylesheet" href="style.css?v=21">
+    <link rel="stylesheet" href="style.css?v=31">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>">
 </head>
 <body>
@@ -20,7 +20,7 @@
         ╩  ╚═╝╩ ╩╚═╝╩ ╩╚═╝╝╚╝</pre>
         </div>
         <div class="header-status">
-            <button class="header-link header-button" id="btnUploadRom">Upload ROM</button>
+            <button class="header-link header-button" id="btnUploadRom">Open ROM Upload</button>
             <button class="header-link header-button" id="btnShareLive">Share Live</button>
             <span class="viewer-counter" id="dashboardViewerCount">0 live viewers</span>
             <span class="status-dot" id="statusDot"></span>
@@ -34,7 +34,7 @@
         <section class="panel log-panel">
             <div class="panel-header">
                 <span class="panel-icon">🧠</span>
-                <span class="panel-title">AI Thought Process & Action Log</span>
+            <span class="panel-title">AI Rationale & Action Log</span>
                 <button class="btn-clear" id="btnClearLog" title="Clear log">✕</button>
             </div>
             <div class="log-container dashboard-section" id="logContainer" data-section-id="thought-log" data-section-title="Thought & Action Log">
@@ -110,7 +110,7 @@
                     <select id="romList" class="bot-select save-list">
                         <option value="">Loading ROMs...</option>
                     </select>
-                    <button class="control-btn" id="btnUseRom">Use ROM</button>
+                    <button class="control-btn" id="btnUseRom">Prepare Switch</button>
                     <button class="control-btn" id="btnRefreshRoms">Refresh</button>
                 </div>
                 <div class="save-status" id="romStatus">Each game gets isolated saves, runs, and bot memory.</div>
@@ -129,153 +129,123 @@
 
         <!-- Right Panel: Game View -->
         <section class="panel game-panel">
-            <div class="panel-header">
-                <span class="panel-icon">🎮</span>
-                <span class="panel-title">Game Screen</span>
-                <span class="panel-meta" id="frameCount"></span>
-            </div>
+            <div class="game-column-resize-handle play-decision-handle" id="playDecisionResizeHandle" title="Resize game and decision columns" aria-label="Resize game and decision columns"></div>
+            <div class="game-column-resize-handle decision-side-handle" id="decisionSideResizeHandle" title="Resize decision and side columns" aria-label="Resize decision and side columns"></div>
 
-            <!-- Game Screen with corner brackets -->
-            <div class="game-screen-wrapper dashboard-section" data-section-id="screen" data-section-title="Game Screen">
-                <div class="game-screen-frame">
-                    <video id="gameStream" class="game-stream hidden" autoplay playsinline muted controls title="Click once to enable audio"></video>
-                    <img id="gameScreen" class="game-screen" alt="Game Screen"
-                         src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPj/HwADBwIAMCbHYQAAAABJRU5ErkJggg==">
-                    <div class="game-screen-overlay" id="screenOverlay">
-                        <span class="overlay-text">Waiting for game...</span>
+            <section class="play-column">
+                <div class="panel-header">
+                    <span class="panel-icon">🎮</span>
+                    <span class="panel-title">Game Screen</span>
+                    <span class="panel-meta" id="frameCount"></span>
+                </div>
+                <!-- Game Screen with corner brackets -->
+                <div class="game-screen-wrapper dashboard-section" data-section-id="screen" data-section-title="Game Screen">
+                    <div class="game-screen-frame">
+                        <video id="gameStream" class="game-stream hidden" autoplay playsinline muted controls title="Click once to enable audio"></video>
+                        <img id="gameScreen" class="game-screen" alt="Game Screen"
+                             src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPj/HwADBwIAMCbHYQAAAABJRU5ErkJggg==">
+                        <div class="game-screen-overlay" id="screenOverlay">
+                            <span class="overlay-text">Waiting for game...</span>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="ai-decision-panel dashboard-section" data-section-id="ai-decision" data-section-title="AI Decision Inspector">
-                <div class="decision-header">
-                    <span class="decision-title">AI Decision Inspector</span>
-                    <span class="decision-updated" id="decisionUpdated">waiting for bot status</span>
-                </div>
-                <div class="decision-grid">
-                    <section class="decision-card" id="decisionMode">Mode switch logic loading...</section>
-                    <section class="decision-card" id="decisionIntent">Intent loading...</section>
-                    <section class="decision-card" id="decisionReadiness">Readiness loading...</section>
-                    <section class="decision-card" id="decisionPolicies">Policy candidates loading...</section>
-                    <section class="decision-card" id="decisionMemory">Learning memory loading...</section>
-                    <section class="decision-card decision-wide" id="decisionTrace">Decision trace loading...</section>
-                </div>
-            </div>
+                <div class="under-emulator-stack">
+                    <!-- Manual Controls (Doom-style watch controls) -->
+                    <div class="controls-panel dashboard-section" data-section-id="controls" data-section-title="Manual Controls">
+                        <div class="controls-title">Input</div>
+                        <div class="dpad-grid" aria-label="D-pad controls">
+                            <button class="control-btn spacer" disabled></button>
+                            <button class="control-btn" data-action="walk_up" title="W / ArrowUp">▲</button>
+                            <button class="control-btn spacer" disabled></button>
+                            <button class="control-btn" data-action="walk_left" title="A / ArrowLeft">◀</button>
+                            <button class="control-btn" data-action="wait_60" title="Space">WAIT</button>
+                            <button class="control-btn" data-action="walk_right" title="D / ArrowRight">▶</button>
+                            <button class="control-btn spacer" disabled></button>
+                            <button class="control-btn" data-action="walk_down" title="S / ArrowDown">▼</button>
+                            <button class="control-btn spacer" disabled></button>
+                        </div>
+                        <div class="face-buttons" aria-label="Game Boy buttons">
+                            <button class="control-btn face-a" data-action="press_a" title="J / Enter">A</button>
+                            <button class="control-btn face-b" data-action="press_b" title="K / Backspace">B</button>
+                            <button class="control-btn" data-action="press_start" title="Enter">START</button>
+                            <button class="control-btn" data-action="press_select" title="Shift">SELECT</button>
+                            <button class="control-btn" data-action="a_until_dialog_end" title="Fast-forward text">A×TEXT</button>
+                        </div>
+                    </div>
 
-            <!-- Manual Controls (Doom-style watch controls) -->
-            <div class="controls-panel dashboard-section" data-section-id="controls" data-section-title="Manual Controls">
-                <div class="controls-title">Manual Controls</div>
-                <div class="dpad-grid" aria-label="D-pad controls">
-                    <button class="control-btn spacer" disabled></button>
-                    <button class="control-btn" data-action="walk_up" title="W / ArrowUp">▲</button>
-                    <button class="control-btn spacer" disabled></button>
-                    <button class="control-btn" data-action="walk_left" title="A / ArrowLeft">◀</button>
-                    <button class="control-btn" data-action="wait_60" title="Space">WAIT</button>
-                    <button class="control-btn" data-action="walk_right" title="D / ArrowRight">▶</button>
-                    <button class="control-btn spacer" disabled></button>
-                    <button class="control-btn" data-action="walk_down" title="S / ArrowDown">▼</button>
-                    <button class="control-btn spacer" disabled></button>
-                </div>
-                <div class="face-buttons" aria-label="Game Boy buttons">
-                    <button class="control-btn face-a" data-action="press_a" title="J / Enter">A</button>
-                    <button class="control-btn face-b" data-action="press_b" title="K / Backspace">B</button>
-                    <button class="control-btn" data-action="press_start" title="Enter">START</button>
-                    <button class="control-btn" data-action="press_select" title="Shift">SELECT</button>
-                    <button class="control-btn" data-action="a_until_dialog_end" title="Fast-forward text">A×TEXT</button>
-                </div>
-                <div class="controls-hint">
-                    Keyboard: WASD/Arrows move, J=A, K=B, Enter=Start, Shift=Select, Space=wait.
-                </div>
-            </div>
+                    <section class="player-state-panel dashboard-section" data-section-id="player-state" data-section-title="Run State">
+                        <div class="panel-header compact-header">
+                            <span class="panel-icon">▣</span>
+                            <span class="panel-title">Run State</span>
+                        </div>
+                        <div class="run-state-strip">
+                            <div class="run-kv"><span>Map</span><strong id="statMap">---</strong></div>
+                            <div class="run-kv"><span>Pos</span><strong id="statPosition">(--, --)</strong></div>
+                            <div class="run-kv"><span>Turns</span><strong id="statTurns">0</strong></div>
+                            <div class="run-kv"><span>Time</span><strong id="statPlayTime">--:--:--</strong></div>
+                            <div class="run-kv money"><span>Money</span><strong id="statMoney">$---</strong></div>
+                        </div>
+                        <div class="stats-grid">
+                            <div class="stat-item badge-item"><span class="stat-label">Badges</span><div class="badges-row" id="badgesRow"><span class="badge-circle empty" title="Boulder">○</span><span class="badge-circle empty" title="Cascade">○</span><span class="badge-circle empty" title="Thunder">○</span><span class="badge-circle empty" title="Rainbow">○</span><span class="badge-circle empty" title="Soul">○</span><span class="badge-circle empty" title="Marsh">○</span><span class="badge-circle empty" title="Volcano">○</span><span class="badge-circle empty" title="Earth">○</span></div></div>
+                        </div>
+                        <div class="run-state-compact-grid">
+                            <div class="compact-block"><div class="player-state-subhead">Team</div><div class="team-container" id="teamContainer"><div class="team-empty-inline">Team loading...</div></div></div>
+                            <div class="compact-block"><div class="player-state-subhead">Inventory</div><div class="inventory-content" id="inventoryContent">Inventory loading...</div></div>
+                        </div>
+                    </section>
 
-            <!-- Stats Grid -->
-            <div class="stats-grid dashboard-section" data-section-id="stats" data-section-title="Stats">
-                <div class="stat-item">
-                    <span class="stat-label">Badges</span>
-                    <div class="badges-row" id="badgesRow">
-                        <span class="badge-circle empty" title="Boulder">○</span>
-                        <span class="badge-circle empty" title="Cascade">○</span>
-                        <span class="badge-circle empty" title="Thunder">○</span>
-                        <span class="badge-circle empty" title="Rainbow">○</span>
-                        <span class="badge-circle empty" title="Soul">○</span>
-                        <span class="badge-circle empty" title="Marsh">○</span>
-                        <span class="badge-circle empty" title="Volcano">○</span>
-                        <span class="badge-circle empty" title="Earth">○</span>
+                    <!-- Battle Info (hidden when not in battle) -->
+                    <div class="battle-info hidden dashboard-section" id="battleInfo" data-section-id="battle" data-section-title="Battle">
+                        <div class="panel-header"><span class="panel-icon">⚔️</span><span class="panel-title">Battle</span></div>
+                        <div class="battle-content" id="battleContent"></div>
                     </div>
                 </div>
-                <div class="stat-item">
-                    <span class="stat-label">Map</span>
-                    <span class="stat-value" id="statMap">---</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Position</span>
-                    <span class="stat-value" id="statPosition">(--, --)</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Money</span>
-                    <span class="stat-value stat-money" id="statMoney">$---</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Play Time</span>
-                    <span class="stat-value" id="statPlayTime">--:--:--</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Turns</span>
-                    <span class="stat-value" id="statTurns">0</span>
-                </div>
-            </div>
+            </section>
 
-            <div class="inventory-panel dashboard-section" data-section-id="inventory" data-section-title="Inventory">
-                <div class="panel-header compact-header">
-                    <span class="panel-icon">▣</span>
-                    <span class="panel-title">Inventory</span>
-                </div>
-                <div class="inventory-content" id="inventoryContent">Inventory loading...</div>
-            </div>
-
-            <div class="below-inventory-grid dashboard-section" data-section-id="team" data-section-title="Current Team">
-                <section class="panel team-panel">
-                    <div class="panel-header">
-                        <span class="panel-icon">⚡</span>
-                        <span class="panel-title">Current Team</span>
+            <section class="inspector-column">
+                <div class="ai-decision-panel dashboard-section" data-section-id="ai-decision" data-section-title="AI Decision Inspector">
+                    <div class="decision-header">
+                        <span class="decision-title">AI Decision Inspector</span>
+                        <span class="decision-updated" id="decisionUpdated">waiting for bot status</span>
                     </div>
-                    <div class="team-container" id="teamContainer">
-                        <div class="team-card empty-card">
-                            <div class="team-name">Empty</div>
-                            <div class="empty-pokeball">○</div>
-                        </div>
-                        <div class="team-card empty-card">
-                            <div class="team-name">Empty</div>
-                            <div class="empty-pokeball">○</div>
-                        </div>
-                        <div class="team-card empty-card">
-                            <div class="team-name">Empty</div>
-                            <div class="empty-pokeball">○</div>
-                        </div>
-                        <div class="team-card empty-card">
-                            <div class="team-name">Empty</div>
-                            <div class="empty-pokeball">○</div>
-                        </div>
-                        <div class="team-card empty-card">
-                            <div class="team-name">Empty</div>
-                            <div class="empty-pokeball">○</div>
-                        </div>
-                        <div class="team-card empty-card">
-                            <div class="team-name">Empty</div>
-                            <div class="empty-pokeball">○</div>
-                        </div>
+                    <div class="decision-graph" id="decisionGraph">Decision graph loading...</div>
+                    <div class="decision-grid">
+                        <section class="decision-card" id="decisionMode">Mode switch logic loading...</section>
+                        <section class="decision-card" id="decisionIntent">Intent loading...</section>
+                        <section class="decision-card" id="decisionReadiness">Readiness loading...</section>
+                        <section class="decision-card" id="decisionPolicies">Policy candidates loading...</section>
+                        <section class="decision-card" id="decisionMemory">Learning memory loading...</section>
+                        <section class="decision-card decision-wide" id="decisionTrace">Decision trace loading...</section>
+                        <section class="decision-card" id="decisionVerification">Verification loading...</section>
+                        <section class="decision-card" id="decisionTransitions">Recent transitions loading...</section>
+                        <section class="decision-card" id="decisionSelectedDetail">Selected detail loading...</section>
+                        <section class="decision-card decision-wide" id="decisionDiagnostics">Diagnostics loading...</section>
+                    </div>
+                </div>
+            </section>
+
+            <section class="chat-column">
+                <section class="diagnostic-chat-panel dashboard-section" data-section-id="diagnostic-chat" data-section-title="Diagnostic Chat">
+                    <div class="panel-header compact-header">
+                        <span class="panel-icon">?</span>
+                        <span class="panel-title">Diagnostic Chat</span>
+                        <span class="diagnostic-chat-mode" id="diagnosticChatMode">Agent loop + approvals</span>
+                        <button class="btn-clear diagnostic-live-btn" id="btnDiagnosticLoop" title="Run a bounded self-critique blocker loop">agent loop</button>
+                        <button class="btn-clear diagnostic-live-btn" id="btnDiagnosticLiveTroubleshoot" title="Start a short live troubleshooting loop">live troubleshoot</button>
+                        <button class="btn-clear" id="btnDiagnosticChatClear" title="Clear diagnostic chat">clear</button>
+                    </div>
+                    <div class="diagnostic-chat-status" id="diagnosticChatStatus">Checking Hermes chat availability...</div>
+                    <div class="diagnostic-change-panel hidden" id="diagnosticChangePanel"></div>
+                    <div class="diagnostic-chat-transcript" id="diagnosticChatTranscript">
+                        <div class="diagnostic-chat-message assistant">Ask about stuck movement, readiness blockers, dashboard issues, or request a safe behavior change like “pause bot”, “switch to adaptive”, or “allow overworld movement”.</div>
+                    </div>
+                    <div class="diagnostic-chat-input-row">
+                        <textarea id="diagnosticChatInput" class="diagnostic-chat-input" rows="3" placeholder="Ask the dashboard agent what is wrong, or request a safe behavior change..."></textarea>
+                        <button class="control-btn" id="btnDiagnosticChatSend">Send</button>
                     </div>
                 </section>
-            </div>
-
-            <!-- Battle Info (hidden when not in battle) -->
-            <div class="battle-info hidden dashboard-section" id="battleInfo" data-section-id="battle" data-section-title="Battle">
-                <div class="panel-header">
-                    <span class="panel-icon">⚔️</span>
-                    <span class="panel-title">Battle</span>
-                </div>
-                <div class="battle-content" id="battleContent"></div>
-            </div>
+            </section>
         </section>
     </main>
 
@@ -286,6 +256,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=16"></script>
+    <script src="app.js?v=37"></script>
 </body>
 </html>

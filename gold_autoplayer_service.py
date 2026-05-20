@@ -117,11 +117,12 @@ class AutoplayerSupervisor:
             return engine, None
         navigation = status.get("navigation") if isinstance(status.get("navigation"), dict) else {}
         actions = status.get("actions") if isinstance(status.get("actions"), list) else []
+        battle_policy = navigation.get("battle_policy")
         battle_blocked = (
             status.get("phase") == "BATTLE"
             and not actions
-            and isinstance(navigation.get("battle_policy"), str)
-            and "blocked_missing_menu_state" in navigation.get("battle_policy")
+            and isinstance(battle_policy, str)
+            and ("blocked" in battle_policy or battle_policy in {"battle_blocked_untrusted_ram", "battle_blocked_unknown_type"})
         )
         hard_stuck = (
             navigation.get("path_source") in {"safety_circuit_breaker", "safety_button_circuit_breaker"}
@@ -144,13 +145,11 @@ class AutoplayerSupervisor:
         if engine == "unified" and profile and profile != "gold_silver":
             return engine, None
         cooldown_until = handoff_state.get("cooldown_until")
-        if (
-            isinstance(cooldown_until, (int, float))
-            and now < cooldown_until
-            and handoff_state.get("from") == engine
-            and handoff_state.get("to") == target
-        ):
-            return engine, None
+        if isinstance(cooldown_until, (int, float)) and now < cooldown_until:
+            previous_from = handoff_state.get("from")
+            previous_to = handoff_state.get("to")
+            if (previous_from, previous_to) in {(engine, target), (target, engine)}:
+                return engine, None
         return target, {
             "from": engine,
             "to": target,

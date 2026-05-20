@@ -1,6 +1,6 @@
 from gold_autoplayer_v2 import GoldAutoplayerV2
 from pokemon_agent.gameplay import choose_catch_action, roster_roles, snapshot_from_state, summarize_inventory
-from pokemon_agent.gameplay.story import ELMS_LAB_RETURN_TARGET, ROUTE31_GRIND_TARGET, VIOLET_MART_BUY_TARGET, VIOLET_POKECENTER_HEAL_TARGET, explain_story_objective, registry_exploration_targets
+from pokemon_agent.gameplay.story import CATCHING_TUTORIAL_TARGET, ELMS_LAB_RETURN_TARGET, MR_POKEMON_HOUSE_TARGET, ROUTE31_GRIND_TARGET, VIOLET_MART_BUY_TARGET, VIOLET_POKECENTER_HEAL_TARGET, explain_story_objective, registry_exploration_targets
 
 
 def make_state(**overrides):
@@ -23,7 +23,7 @@ def make_state(**overrides):
         "party": [
             {"slot": 1, "species_id": 0x9B, "species": "Cyndaquil", "level": 8, "hp": 24, "max_hp": 30, "moves": [33, 43]},
         ],
-        "bag": [{"item_id": 0x04, "item": "Poke Ball", "quantity": 3}],
+        "bag": [{"item_id": 0x05, "item": "Poke Ball", "quantity": 3}],
         "battle": {"in_battle": False, "type_id": 0, "wild_species_id": 0, "enemy_level": 0},
         "flags": {"has_starter": True},
     }
@@ -61,7 +61,7 @@ def test_snapshot_filters_untrusted_party_members_for_starter_progress():
 
 
 def test_inventory_summary_ignores_untrusted_bag_items():
-    state = make_state(bag=[{"item_id": 0x04, "item": "Poke Ball", "quantity": 250, "trusted": False}])
+    state = make_state(bag=[{"item_id": 0x05, "item": "Poke Ball", "quantity": 250, "trusted": False}])
 
     summary = summarize_inventory(snapshot_from_state(state))
 
@@ -171,6 +171,19 @@ def test_catch_policy_does_not_weaken_enemy_with_dangerous_move():
 
     assert decision.action == "throw_ball"
     assert decision.reason == "target has dangerous move; avoid weakening"
+
+
+def test_catch_policy_throws_immediately_at_low_level_early_roster_target():
+    state = make_state(
+        party=[{"slot": 1, "species_id": 155, "species": "Cyndaquil", "level": 9, "hp": 17, "max_hp": 28}],
+        bag=[{"item_id": 0x05, "item": "Poke Ball", "quantity": 3}],
+        battle={"in_battle": True, "type_id": 1, "wild_species_id": 0x10, "enemy_level": 3, "enemy_hp": 16, "enemy_max_hp": 16},
+    )
+
+    decision = choose_catch_action(snapshot_from_state(state))
+
+    assert decision.action == "throw_ball"
+    assert "low-level route encounter" in decision.reason
 
 
 def test_snapshot_menu_rejects_low_confidence():
@@ -290,6 +303,41 @@ def test_story_routes_cherrygrove_back_to_elm_after_mystery_egg():
     assert decision.target == ELMS_LAB_RETURN_TARGET
 
 
+def test_story_route30_visits_mr_pokemon_when_event_flags_unavailable():
+    state = make_state(
+        player={
+            "money": 1200,
+            "badges": [],
+            "facing": "up",
+            "position": {"map_group": 26, "map_number": 1, "map_name": "Route 30", "actual_x": 7, "actual_y": 12},
+        },
+        flags={"derived_story_flags": {"has_starter": True, "event_flags_available": False}},
+    )
+
+    decision = explain_story_objective(state)
+
+    assert decision.objective_key == "mr_pokemon"
+    assert decision.target == MR_POKEMON_HOUSE_TARGET
+
+
+def test_story_avoids_falkner_when_early_flags_incomplete_in_violet():
+    state = make_state(
+        player={
+            "money": 1200,
+            "badges": [],
+            "facing": "down",
+            "position": {"map_group": 10, "map_number": 5, "map_name": "Violet City", "actual_x": 31, "actual_y": 25},
+        },
+        party=[{"slot": 1, "species_id": 155, "species": "Cyndaquil", "level": 12, "hp": 34, "max_hp": 34}],
+        flags={"derived_story_flags": {"has_starter": True, "event_flags_available": False}},
+    )
+
+    decision = explain_story_objective(state)
+
+    assert decision.objective_key == "route31_grind"
+    assert decision.reason == "early_story_flags_incomplete_before_falkner"
+
+
 def test_story_routes_low_hp_in_violet_gym_to_pokecenter_before_falkner():
     state = make_state(
         player={
@@ -339,20 +387,20 @@ def test_story_routes_no_balls_in_violet_to_mart_before_grind():
 
     decision = explain_story_objective(state)
 
-    assert decision.objective_key == "violet_buy_balls"
+    assert decision.objective_key == "violet_buy_supplies"
     assert decision.target == VIOLET_MART_BUY_TARGET
 
 
-def test_story_routes_with_balls_and_low_level_to_route31_grind():
+def test_story_routes_no_balls_on_route30_to_mart_before_grind():
     state = make_state(
         player={
-            "money": 814,
+            "money": 662,
             "badges": [],
-            "facing": "down",
-            "position": {"map_group": 10, "map_number": 5, "map_name": "Violet City", "actual_x": 31, "actual_y": 25},
+            "facing": "left",
+            "position": {"map_group": 26, "map_number": 1, "map_name": "Route 30", "actual_x": 7, "actual_y": 26},
         },
-        party=[{"slot": 1, "species_id": 158, "species": "Totodile", "level": 9, "hp": 29, "max_hp": 29}],
-        bag=[{"item_id": 0x04, "item": "Poke Ball", "quantity": 3}],
+        party=[{"slot": 1, "species_id": 155, "species": "Cyndaquil", "level": 9, "hp": 17, "max_hp": 28}],
+        bag=[{"item_id": 0x12, "item": "Potion", "quantity": 1}],
         flags={
             "derived_story_flags": {
                 "has_starter": True,
@@ -365,8 +413,114 @@ def test_story_routes_with_balls_and_low_level_to_route31_grind():
 
     decision = explain_story_objective(state)
 
-    assert decision.objective_key == "route31_grind"
-    assert decision.target == ROUTE31_GRIND_TARGET
+    assert decision.objective_key == "violet_buy_supplies"
+    assert decision.target == VIOLET_MART_BUY_TARGET
+
+
+def test_story_routes_critical_hp_on_route30_to_pokecenter():
+    state = make_state(
+        player={
+            "money": 662,
+            "badges": [],
+            "facing": "left",
+            "position": {"map_group": 26, "map_number": 1, "map_name": "Route 30", "actual_x": 7, "actual_y": 26},
+        },
+        party=[{"slot": 1, "species_id": 155, "species": "Cyndaquil", "level": 9, "hp": 10, "max_hp": 28}],
+        bag=[{"item_id": 0x12, "item": "Potion", "quantity": 1}],
+        flags={
+            "derived_story_flags": {
+                "has_starter": True,
+                "has_zephyr_badge": False,
+                "gave_mystery_egg_to_elm": True,
+                "learned_to_catch_pokemon": True,
+            }
+        },
+    )
+
+    decision = explain_story_objective(state)
+
+    assert decision.objective_key == "violet_heal"
+    assert decision.target == VIOLET_POKECENTER_HEAL_TARGET
+
+
+def test_story_routes_with_balls_and_low_level_to_route31_grind():
+    state = make_state(
+        player={
+            "money": 814,
+            "badges": [],
+            "facing": "down",
+            "position": {"map_group": 10, "map_number": 5, "map_name": "Violet City", "actual_x": 31, "actual_y": 25},
+        },
+        party=[{"slot": 1, "species_id": 158, "species": "Totodile", "level": 9, "hp": 29, "max_hp": 29}],
+        bag=[{"item_id": 0x05, "item": "Poke Ball", "quantity": 3}],
+        flags={
+            "derived_story_flags": {
+                "has_starter": True,
+                "has_zephyr_badge": False,
+                "gave_mystery_egg_to_elm": True,
+                "learned_to_catch_pokemon": True,
+            }
+        },
+    )
+
+    decision = explain_story_objective(state)
+
+    assert decision.objective_key == "violet_buy_supplies"
+    assert decision.target == VIOLET_MART_BUY_TARGET
+
+
+def test_story_challenges_falkner_when_roster_blocked_but_lead_ready():
+    state = make_state(
+        player={
+            "money": 52,
+            "badges": [],
+            "facing": "down",
+            "position": {"map_group": 26, "map_number": 2, "map_name": "Route 31", "actual_x": 17, "actual_y": 12},
+        },
+        party=[{"slot": 1, "species_id": 155, "species": "Cyndaquil", "level": 13, "hp": 35, "max_hp": 35}],
+        bag=[{"item_id": 0x18, "item": "Potion", "quantity": 1}],
+        flags={
+            "derived_story_flags": {
+                "has_starter": True,
+                "has_zephyr_badge": False,
+                "gave_mystery_egg_to_elm": True,
+                "learned_to_catch_pokemon": True,
+            }
+        },
+    )
+
+    decision = explain_story_objective(state)
+
+    assert decision.objective_key == "violet_gate"
+    assert decision.reason == "route31_to_violet_gate"
+
+
+def test_story_prioritizes_catching_tutorial_before_buying_balls_or_gym():
+    state = make_state(
+        player={
+            "money": 307,
+            "badges": [],
+            "facing": "down",
+            "position": {"map_group": 10, "map_number": 7, "map_name": "Violet Gym", "actual_x": 4, "actual_y": 1},
+        },
+        party=[{"slot": 1, "species_id": 155, "species": "Cyndaquil", "level": 12, "hp": 25, "max_hp": 34}],
+        bag=[{"item_id": 0x18, "item": "Potion", "quantity": 1}],
+        flags={
+            "derived_story_flags": {
+                "has_starter": True,
+                "has_zephyr_badge": False,
+                "event_flags_available": True,
+                "gave_mystery_egg_to_elm": True,
+                "learned_to_catch_pokemon": False,
+            }
+        },
+    )
+
+    decision = explain_story_objective(state)
+
+    assert decision.objective_key == "learn_catching_tutorial"
+    assert decision.target == CATCHING_TUTORIAL_TARGET
+    assert decision.target.tiles == frozenset({(53, 8), (53, 9)})
 
 
 def test_story_fallback_after_scripted_targets_uses_registry_transition():

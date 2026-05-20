@@ -48,7 +48,7 @@ the same server/action/learning loop with game-specific plugins.
 - Verified action executor and smooth hold-based movement.
 - RAM trust/readiness checks.
 - Dialogue/menu/battle uncertainty gates.
-- Blocked-edge learning and stuck recovery.
+- Blocked-edge learning, battle/dialogue resume probes, and stuck recovery.
 - Cross-map route planner architecture.
 - Story objective and gameplay policy shapes.
 
@@ -128,12 +128,19 @@ mirrors bounded facts from `gold_world_model.json` and `gold_policy.json` into
 used as evidence for fallback decisions and diagnostics; they do not replace
 verified route planning.
 
+Gold/Silver starter selection is profile-local learning, not global policy.
+`gold_autoplayer_v2_learning.json:starter_selection` rotates starters and safe
+nicknames for fresh runs, then records the completed choice as `PKM:TEAM`.
+
 ## Learning Techniques
 
 - Reward shaping: small rewards for verified actions, movement, map transitions,
   tile novelty, catches, badges, and penalties for blocked/unverified movement.
 - Bandit/action-value tables: JSON-backed state/action counts and mean rewards so
   ambiguous recovery choices can eventually prefer what worked before.
+- Resume probes: if verified progress stops, V2/adaptive use bounded recovery
+  sequences for blocked navigation, battle fallback no-progress, and ambiguous
+  text/menu states before escalating to supervisor handoff.
 - Planner imitation: V2 can record planner-suggested actions and later reuse them
   only in matching map/objective contexts after verification.
 - Curriculum: story goals remain explicit and observable; learned retry/failure
